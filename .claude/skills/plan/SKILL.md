@@ -72,6 +72,7 @@ Use this bar when deciding whether the plan is strong enough:
 - Each epic PRD answers: today's pain, single-sentence goal, target UX (with a concrete example), explicit in-scope and out-of-scope lists, and hard constraints. A PRD that omits these is not implementation-ready.
 - Tasks are atomic: one clear output, completable in a single agent session, with no dependency on unreleased in-flight work.
 - Acceptance criteria are observable commands and expected outputs — not assertions about quality. No "correctly", "appropriately", "as needed", or "works".
+- When acceptance criteria reference a specific run command (e.g. `node --loader ts-node/esm`, `npx tsx`, a specific test runner), validate that the command works against the project's actual environment before treating it as a baseline. A task spec that assumes a broken toolchain will waste the entire implementation session.
 - Risks, assumptions, and open questions are visible rather than buried.
 - Execution-relevant guidance is captured where implementers will see it, not only in brainstorming notes.
 - An alignment summary was produced and the user explicitly confirmed it before the plan was finalized.
