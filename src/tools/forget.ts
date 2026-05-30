@@ -1,11 +1,6 @@
 import type { MemoryStore } from "../memory-store.js";
 import { META_STATUS } from "../schema.js";
-
-function parseRef(id: string): { type: string; id: string } {
-	const slash = id.indexOf("/");
-	if (slash < 1) return { type: id, id: "" };
-	return { type: id.slice(0, slash), id: id.slice(slash + 1) };
-}
+import { parseRef } from "../ref.js";
 
 export async function handleForget(
 	store: MemoryStore,

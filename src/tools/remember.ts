@@ -12,15 +12,16 @@ import {
 	META_LAST_SEEN_AT,
 } from "../schema.js";
 
-function slugify(title: string): string {
+export function slugify(title: string): string {
 	return title
 		.toLowerCase()
-		.replace(/\s+/g, "-")
-		.replace(/[^a-z0-9-]/g, "")
-		.slice(0, 60);
+		.replace(/[^a-z0-9]+/g, "-") // any run of non-alphanumerics → single hyphen
+		.replace(/^-+|-+$/g, "") // trim leading/trailing hyphens
+		.slice(0, 60)
+		.replace(/-+$/g, ""); // trim a trailing hyphen the slice may have created
 }
 
-function parseCallerProvenance(
+export function parseCallerProvenance(
 	p: Partial<ProvenanceMetadata>,
 ): Record<string, unknown> {
 	const meta: Record<string, unknown> = {};
