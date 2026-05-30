@@ -53,6 +53,10 @@ export class MemoryStore {
 		return this._store;
 	}
 
+	async compact(): Promise<void> {
+		await this._store.compact();
+	}
+
 	async commit(): Promise<void> {
 		await this._store.commit();
 	}
