@@ -1,8 +1,8 @@
 # PRD: AKG Durable Memory Pi Package
 
-Status: Product decisions resolved; ready for Phase 1 implementation planning  
+Status: Phase 0 + Phase 1 implemented; Phase 2 product decisions resolved and broken down in `TASKS.md`  
 Source brief: `report-akg_pi_memory_recommendations.md`  
-Last updated: 2026-05-28
+Last updated: 2026-05-30
 
 ## 1. Problem
 
@@ -521,6 +521,13 @@ Exit criteria:
 - Automatic capture produces useful low-noise candidates.
 - Memory stays compact and curated.
 
+**Resolved approach (2026-05-30) — see §14 Phase 2 decisions and `TASKS.md` P2-001..015:**
+
+- Extraction is **hybrid**: a bounded LLM pass runs only on Pi's already-distilled summaries (`session_compact`, `session_tree`); raw turns (`agent_end`) get a lightweight deterministic nudge, not an automatic LLM pass.
+- Candidates flow through a mode-independent control layer — a sidecar pending **queue** (`.pi/memory-candidates.jsonl`, outside the `.akg` file), **provenance** on every write, and **forward bulk-revert** — which is where transparency and user/operator control live.
+- **Headless / RPC sessions** default to **risk-gated auto-commit** (confident + safe candidates write as `status: unreviewed`, `source: auto`; sensitive/low-confidence defer to the queue). Interactive sessions defer everything for human review. Governed by a `headlessPolicy` setting.
+- Because `akg-ts` has no selective commit, capture is **gate-then-write**: the `.akg` graph only ever contains memories that passed the gate, and "revert" is a forward forget operation, not a WAL rollback.
+
 ### Phase 3: richer retrieval and long-term maintenance
 
 Outcome: Memory remains useful as the graph grows.
@@ -638,8 +645,15 @@ The extension should remain the runtime owner of memory behavior. Source modules
 4. Phase 1 includes a lightweight `/memory-status` extension command in addition to model-callable tools, with optional prompt/template support later. It reports enabled state, path, hint/budget settings, approximate counts, recent memory titles, gitignore recommendation, available tools, and suggested next actions without dumping full memory records.
 5. Explicit memories use risk-based confirmation without being overwhelming. Normal project memories write directly; sensitive, secret-like, low-confidence/inferred, ambiguous, or destructive operations require confirmation when possible or fail with guidance when confirmation is unavailable. A stricter ask-before-every-write setting may be offered.
 
+### Phase 2 decisions (resolved 2026-05-30)
+
+6. **Principle 5 is scoped to retrieval.** "Candidate generation is deterministic" governs how memory is *retrieved* (deterministic filtering of the graph). Deciding what is worth extracting *from free-form conversation* is a judgment task and is delegated to an LLM/agent, not to deterministic keyword heuristics. Determinism in Phase 2 lives in the plumbing — dedup, provenance, the queue, and revert.
+7. **Automatic extraction is hybrid and summary-first.** A bounded LLM extraction pass runs only on Pi's distilled compaction and branch summaries; raw completed turns receive at most a lightweight, opt-in deterministic nudge. This keeps capture low-noise and bounds token cost (`autoCaptureSources`, `liveTurnNudge` settings).
+8. **The control layer is the product, and it is mode-independent.** Every captured or suggested memory passes through a visible pending queue, carries provenance, and is reversible by a forward forget operation. This holds identically in interactive and headless modes; it is what delivers transparency and "take back control."
+9. **Headless / RPC behavior is first-class.** Sessions with no UI (`ctx.hasUI === false`) default to risk-gated auto-commit: confident, safe candidates write as `unreviewed`/`source: auto` with full provenance; sensitive or low-confidence ones defer to the queue. Interactive sessions never auto-commit — they defer for human review. The default is configurable via `headlessPolicy` (`auto-commit` | `defer` | `off`), and an orchestrator can audit and revert via the RPC event/command stream.
+
 ## 15. Readiness State
 
-This PRD is comprehensive and the Section 14 product policy questions are resolved. It is ready for Phase 1 implementation planning, subject to normal validation against the target `akg-ts` version during implementation.
+This PRD is comprehensive and the Section 14 product policy questions are resolved. Phase 0 and Phase 1 are implemented (validated against `akg-ts` 0.1.1 and Pi 0.78.0, with a Vitest test baseline). Phase 2 product decisions are resolved (§14, items 6–9) and broken down into implementation-ready tasks in `TASKS.md` (P2-001..015). Phase 3 remains roadmap-level.
 
 Resolved naming decision: the package/repository should be `rgumeny/pi-memory-akg` unless a later publishing step requires a separate npm package name.

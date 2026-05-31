@@ -1,8 +1,12 @@
 # TASKS: pi-memory-akg Implementation
 
 Source: `PRD.md` (Status: Implementation-ready, 2026-05-28)  
-Phases in scope: Phase 0 (baseline validation) and Phase 1 (explicit memory tools).  
-Phase 2 and Phase 3 are documented in `PRD.md §12` but not broken down here.
+Phases in scope: Phase 0 (baseline validation), Phase 1 (explicit memory tools), and Phase 2 (selective automatic extraction).  
+Phase 3 is documented in `PRD.md §12` but not broken down here.
+
+**Status:** Phase 0 (P0-001..006) and Phase 1 (P1-001..018) are complete, with a Vitest unit + integration baseline in place. Phase 2 (P2-001..015) is the new batch below.
+
+**Toolchain note (validated 2026-05-30):** Running Pi is **0.78.0**; `@earendil-works/pi-coding-agent` and `@earendil-works/pi-ai` are installed as devDependencies at `^0.78.0` so types resolve. The test runner is **Vitest** (`npm test`, `npm run test:unit`, `npm run test:integration`). Standalone scripts run under `npx tsx`; type-check with `npx tsc --noEmit`. **`node --loader ts-node/esm` does NOT work in this repo** — do not use it in acceptance criteria (the Phase 1 criteria that reference it are superseded by Vitest/tsx).
 
 ---
 
@@ -573,9 +577,346 @@ Exit criteria: memory survives across Pi sessions; recall improves continuity wi
 
 ---
 
+## Phase 2 — Selective Automatic Extraction
+
+**Goal:** The package automatically *suggests or captures* durable memories from completed work while staying low-noise. Capture is transparent, provenance-stamped, and reversible — the user (or an orchestrator) can always see what was captured, why, and undo it.
+
+**Depends on:** All Phase 1 tasks complete (the six tools, store lifecycle, retrieval, risk-policy, maintenance, and the Vitest baseline).
+
+### Resolved Phase 2 design decisions
+
+These were resolved in the planning session of 2026-05-30 and govern every task below. They extend, and where noted reinterpret, `PRD.md §12`:
+
+1. **Hybrid extraction.** A bounded **LLM extraction pass** runs on Pi's *already-distilled* summaries — compaction summaries (`session_compact`) and branch summaries (`session_tree`) — which are high-signal and low-frequency. Raw live turns (`agent_end`) get only a **lightweight deterministic nudge**, never an automatic LLM pass.
+2. **Deterministic extraction heuristics are NOT used to generate candidates.** Keyword/pattern scraping of free-form text is noisy and lossy. `PRD.md §3` Principle 5 ("candidate generation is deterministic") applies to *retrieval* (filtering the graph), not to *extraction* from conversation. Determinism in Phase 2 lives in the **plumbing** — dedup, provenance stamping, the queue, and revert — not in deciding what is worth a memory.
+3. **The control layer is the centerpiece, and it is mode-independent.** Every captured/suggested memory flows through: a visible pending **queue**, **provenance** on every write, and **forward bulk-revert** (mark inactive / supersede / cascade-delete — never a WAL rollback). This layer is identical in interactive and headless modes.
+4. **Headless / RPC default = risk-gated auto-commit.** In a session with no UI (`ctx.hasUI === false`, e.g. orchestrator-driven RPC), *confident + safe* candidates auto-commit to the graph stamped `status: "unreviewed"`, `source: "auto"`, with full provenance; *sensitive / low-confidence* candidates are deferred to the queue. The orchestrator can audit via the RPC event/command stream and bulk-revert at will. Behavior is a setting (`headlessPolicy`).
+5. **Gate-then-write, never write-then-rollback.** `akg-ts` has **no selective commit** — `commit()` flushes all pending mutations. So the capture decision happens *before* `putNode` is ever called. The `.akg` graph only ever contains memories that passed the gate. Deferred candidates live **outside** `.akg`, in a project-local sidecar queue. "Revert" of an auto-captured node is a normal forward operation (filter by `meta.status === "unreviewed"` → forget), reusing Phase 1 tooling.
+6. **The LLM call is a dependency-injected function.** Extraction logic (prompt assembly, response parsing, schema validation, dedup, routing) takes an `LlmFn` parameter and is fully unit-testable with a fake. Only the thin adapter that binds `ctx.model` to a real `LlmFn` lives in (untested) extension glue, consistent with `test/testing-strategy.md`.
+
+Exit criteria (from `PRD.md §12`): automatic capture produces useful low-noise candidates; memory stays compact and curated; and — added this phase — capture is transparent and reversible in both interactive and headless modes.
+
+---
+
+### P2-001 — Extend `src/settings.ts` with auto-capture settings
+
+**Output:** `src/settings.ts` gains Phase 2 settings with defaults; `loadSettings` merges them.
+
+**Spec:**
+- Add to the `Settings` type and defaults:
+  - `autoCaptureEnabled: boolean` (default `true`)
+  - `autoCaptureSources: ("compaction" | "branch")[]` (default `["compaction", "branch"]`)
+  - `headlessPolicy: "auto-commit" | "defer" | "off"` (default `"auto-commit"`)
+  - `candidateQueuePath: string` (default `.pi/memory-candidates.jsonl`, relative to `cwd`)
+  - `autoCommitMinConfidence: number` (default `0.7`) — candidates at/above this AND judged safe may auto-commit
+  - `dropBelowConfidence: number` (default `0.3`) — candidates below this are discarded, not queued
+  - `maxCandidatesPerExtraction: number` (default `10`)
+  - `liveTurnNudge: boolean` (default `false`) — the `agent_end` deterministic nudge, opt-in to avoid noise
+- All existing Phase 1 settings and `loadSettings(overrides?)` merge semantics are preserved.
+
+**Acceptance criteria:**
+- `npx tsc --noEmit` exits 0.
+- `npm run test:unit` passes, including a new `test/unit/settings.test.ts` case asserting `loadSettings().headlessPolicy === "auto-commit"` and `loadSettings({ headlessPolicy: "defer" }).headlessPolicy === "defer"`.
+- A test asserts `loadSettings().autoCaptureSources` deep-equals `["compaction", "branch"]` and `loadSettings().autoCommitMinConfidence === 0.7`.
+
+---
+
+### P2-002 — Implement `src/candidate-queue.ts` (sidecar pending queue)
+
+**Depends on:** P2-001, P1-003 (provenance type)
+
+**Output:** `src/candidate-queue.ts` manages a project-local newline-delimited JSON queue of pending memory candidates at `settings.candidateQueuePath`. This file is **not** an `.akg` file and never touches `akg-ts`.
+
+**Spec:**
+- Define and export the canonical candidate shape:
+  ```ts
+  interface MemoryCandidate {
+    id: string;             // queue-local stable id (e.g. `${origin}-${slug}-${shortHash}`)
+    type: string;           // a NODE_TYPES value
+    title: string;
+    body: string;
+    tags?: string[];
+    confidence: number;     // 0..1
+    origin: "compaction" | "branch" | "turn";
+    provenance: ProvenanceMetadata;
+    createdAt: string;      // ISO timestamp
+  }
+  ```
+- Export `class CandidateQueue` (or equivalent functions) with: `static open(cwd, settings)`, `append(c)`, `list(): MemoryCandidate[]`, `get(id)`, `remove(id)`, `clear()`. Reads/writes are JSONL; a missing file is treated as an empty queue (created on first append).
+- Appends must be durable (flush to disk) and tolerate a corrupt/partial trailing line by skipping it rather than throwing.
+- Must not create the `.pi/` directory destructively if it already exists; create it if absent.
+
+**Acceptance criteria:**
+- `npx tsc --noEmit` exits 0.
+- New `test/integration/candidate-queue.test.ts` (real temp dir via the existing temp-dir helper pattern) passes: append two candidates → `list()` returns 2 in insertion order; `remove(id)` of the first → `list()` returns 1; reopening the queue from the same path returns the surviving candidate (persistence across reopen).
+- A test writes a file with a valid line followed by a truncated `{"id":` line and asserts `list()` returns exactly the one valid candidate (no throw).
+
+---
+
+### P2-003 — Extend `src/provenance.ts` for auto-capture provenance
+
+**Depends on:** P1-003, P1-001
+
+**Output:** `src/provenance.ts` gains a helper that builds richer provenance for auto-captured memories.
+
+**Spec:**
+- Export `buildAutoProvenance(input: { cwd?; sessionId?; entryIds?; origin: "compaction" | "branch" | "turn"; summaryEntryId?; confidence: number }): ProvenanceMetadata`.
+- The returned metadata sets `source: "auto"`, includes `origin`, `summary_entry_id` (when provided), `confidence`, and `last_seen_at` (ISO), and omits undefined fields (matching existing `buildProvenance` behavior).
+- Auto-captured records carry `status: "unreviewed"` — define this as the status value written by the capture path (P2-007), not by provenance itself, but document the constant here or in `schema.ts`.
+
+**Acceptance criteria:**
+- `npx tsc --noEmit` exits 0.
+- New unit test in `test/unit/provenance.test.ts` (under `vi.useFakeTimers()` per the existing convention) asserts: `buildAutoProvenance({ origin: "compaction", confidence: 0.8 }).source === "auto"`, `.origin === "compaction"`, `.confidence === 0.8`, exact `last_seen_at`, and that an omitted `sessionId` does not appear as a key.
+
+---
+
+### P2-004 — Implement `src/dedup.ts`
+
+**Depends on:** P1-001, P1-004 (store), P2-002 (candidate type)
+
+**Output:** `src/dedup.ts` decides whether a candidate is new, an update to an existing memory, or a duplicate — checked against both the graph and the queue.
+
+**Spec:**
+- Export `classifyCandidate(candidate: MemoryCandidate, store: MemoryStore, queue: MemoryCandidate[]): { action: "new" | "update" | "duplicate"; existingId?: string }`.
+- `"update"`: a graph node with the same `type` and a normalized-equal `title` exists (normalization: lowercase, collapse whitespace, trim) → returns its id so the caller upserts/supersedes rather than creating a sibling.
+- `"duplicate"`: an equivalent candidate already sits in the queue (same `type` + normalized `title`) → caller should skip enqueuing.
+- `"new"`: no match in graph or queue.
+- Pure logic over store read accessors + an in-memory queue array, so it is unit-testable with the existing `makeFakeStore` fake.
+
+**Acceptance criteria:**
+- `npx tsc --noEmit` exits 0.
+- New `test/unit/dedup.test.ts` passes with `makeFakeStore`: a candidate whose title matches an existing node (different casing/whitespace) → `{ action: "update", existingId }`; a candidate matching a queue entry → `"duplicate"`; a novel candidate → `"new"`.
+
+---
+
+### P2-005 — Implement `src/extraction.ts` (LLM-injected extraction)
+
+**Depends on:** P1-001, P2-001, P2-002 (candidate type), P2-003
+
+**Output:** `src/extraction.ts` turns a distilled summary into validated candidate records using an injected LLM function.
+
+**Spec:**
+- Export `type LlmFn = (prompt: string, opts?: { signal?: AbortSignal }) => Promise<string>`.
+- Export `extractCandidates(input: { summaryText: string; origin: "compaction" | "branch"; provenanceBase: {...} }, llm: LlmFn, settings: Settings): Promise<MemoryCandidate[]>`.
+- Build a bounded prompt instructing the model to return STRICT JSON: an array of `{ type, title, body, tags?, confidence }`, only durable facts (decisions/constraints/preferences/tasks/artifacts/repo facts), no transcript echoes.
+- Parse defensively: tolerate code-fenced JSON; on malformed JSON return `[]` (never throw). Validate each item — drop items whose `type` is not in `NODE_TYPES`, whose `title`/`body` is empty, or whose `confidence` is not a finite 0..1 number. Cap to `settings.maxCandidatesPerExtraction`.
+- Attach `provenance` via `buildAutoProvenance` and a stable queue `id` to each surviving candidate.
+
+**Acceptance criteria:**
+- `npx tsc --noEmit` exits 0.
+- New `test/unit/extraction.test.ts` passes with a fake `LlmFn`: a fake returning valid JSON for 3 items (one with an invalid `type`) yields exactly 2 valid candidates, each with `source: "auto"` provenance; a fake returning malformed text yields `[]`; a fake returning 50 items is capped to `maxCandidatesPerExtraction`.
+
+---
+
+### P2-006 — Implement `src/capture-policy.ts` (the gate)
+
+**Depends on:** P1-005 (risk-policy), P2-001, P2-005 (candidate type)
+
+**Output:** `src/capture-policy.ts` routes a candidate to auto-commit, defer, or drop, combining confidence, the existing risk assessment, UI availability, and `headlessPolicy`.
+
+**Spec:**
+- Export `routeCandidate(candidate: MemoryCandidate, ctx: { hasUI: boolean }, settings: Settings): { action: "auto-commit" | "defer" | "drop"; reason: string }`.
+- Decision order:
+  1. `confidence < settings.dropBelowConfidence` → `"drop"`.
+  2. Run `assessRisk` on the candidate. If it is not a clean `"write"` (i.e. sensitive/secret-like/low-confidence/ambiguous) → `"defer"`.
+  3. If clean AND `confidence >= settings.autoCommitMinConfidence`:
+     - interactive (`hasUI`) → `"defer"` (a human is present to review; do not auto-write).
+     - headless + `headlessPolicy === "auto-commit"` → `"auto-commit"`.
+     - headless + `headlessPolicy === "defer"` → `"defer"`.
+     - `headlessPolicy === "off"` → `"drop"`.
+  4. Otherwise → `"defer"`.
+- Pure function; no I/O.
+
+**Acceptance criteria:**
+- `npx tsc --noEmit` exits 0.
+- New `test/unit/capture-policy.test.ts` covers the matrix: high-confidence clean candidate → `"defer"` interactive, `"auto-commit"` headless+auto-commit, `"defer"` headless+defer, `"drop"` headless+off; a secret-like body → `"defer"` regardless of confidence/mode; `confidence` below `dropBelowConfidence` → `"drop"`.
+
+---
+
+### P2-007 — Implement `src/auto-capture.ts` (orchestration)
+
+**Depends on:** P2-002, P2-003, P2-004, P2-005, P2-006, P1-004, P1-008 (remember write path)
+
+**Output:** `src/auto-capture.ts` runs the full pipeline for one summary and returns a deterministic outcome report.
+
+**Spec:**
+- Export `runAutoCapture(args: { store: MemoryStore; queue: CandidateQueue; summaryText: string; origin: "compaction" | "branch"; provenanceBase; llm: LlmFn; settings: Settings; hasUI: boolean; signal?: AbortSignal }): Promise<{ committed: string[]; deferred: string[]; dropped: number; duplicates: number }>`.
+- Pipeline: `extractCandidates` → for each, `classifyCandidate` (skip on `"duplicate"`, counting it) → `routeCandidate`:
+  - `"auto-commit"` → write to the graph reusing the Phase 1 remember write path with `status: "unreviewed"`, `source: "auto"`, and provenance; on `"update"` classification, upsert/supersede the existing id rather than duplicating.
+  - `"defer"` → `queue.append(candidate)`.
+  - `"drop"` → discard.
+- After processing, if anything was committed, call `store.commit()` exactly once (gate-then-write; batch durability per design decision 5).
+- Never throw on a single bad candidate — isolate per-candidate failures and continue.
+
+**Acceptance criteria:**
+- `npx tsc --noEmit` exits 0.
+- New `test/integration/auto-capture.test.ts` (real temp store + real temp queue + fake `LlmFn`) passes:
+  - headless (`hasUI:false`, default settings), fake LLM returns one high-confidence clean candidate + one secret-like candidate → report shows 1 committed, 1 deferred; the committed node exists in the graph with `meta.status === "unreviewed"` and `meta.source === "auto"`; the deferred candidate is in the queue and NOT in the graph.
+  - interactive (`hasUI:true`) with the same input → 0 committed, 2 deferred (high-confidence clean is deferred for human review).
+  - re-running the same extraction twice does not create a duplicate graph node (dedup `"update"`/`"duplicate"` path).
+
+---
+
+### P2-008 — Implement review surface: `memory_review` tool + `/memory-review` command
+
+**Depends on:** P2-002, P1-008 (remember), P1-004
+
+**Output:** `src/tools/review.ts` with shared logic, exposed as both an LLM/RPC-callable `memory_review` tool and an interactive `/memory-review` command.
+
+**Spec:**
+- Shared logic: `listPending(queue)`, `accept(queue, store, id, edits?)` (promote a candidate to a real graph node via the remember write path, set `status: "active"`, remove from queue), `reject(queue, id)` (remove from queue, no graph write).
+- `memory_review` tool params: `{ action: "list" | "accept" | "reject"; id?; edits? }`. `action:"list"` returns a compact bounded summary of pending candidates (reuse `formatCandidates`-style budgeting, `settings.toolResultBudget`). Usable by the agent and by an orchestrator over RPC.
+- `/memory-review` command (interactive): if `ctx.hasUI`, walk pending candidates with `ctx.ui.confirm`/`ctx.ui.select` to accept/reject/skip; otherwise `ctx.ui.notify` a message pointing at the `memory_review` tool.
+- Accept/reject must be atomic per candidate (queue and graph stay consistent if one fails).
+
+**Acceptance criteria:**
+- `npx tsc --noEmit` exits 0.
+- New `test/integration/review.test.ts` passes: seed the queue with 2 candidates; `accept(first)` → first becomes an `active` graph node and queue length drops to 1; `reject(second)` → queue empty and no second node in the graph; accepting with `edits` (changed title/body) writes the edited values.
+
+---
+
+### P2-009 — Implement bulk revert: `memory_revert` tool + `/memory-revert` command
+
+**Depends on:** P1-006 (retrieval filters), P1-011 (forget), P1-004
+
+**Output:** `src/tools/revert.ts` with shared logic and both tool and command surfaces, for sweeping auto-captured `unreviewed` memories.
+
+**Spec:**
+- Shared logic: `findUnreviewed(store, filter?: { origin?; sessionId?; sinceMs? })` returns auto-captured nodes where `meta.status === "unreviewed"` (optionally narrowed); `revert(store, ids, mode: "deactivate" | "delete")` applies the Phase 1 forget operation per id (default `"deactivate"`; `"delete"` uses cascade per FR6 semantics).
+- `memory_revert` tool params: `{ mode?: "deactivate" | "delete"; origin?; sinceMs?; confirm? }`. With no `confirm` it returns a dry-run summary (how many would be affected, list of ids/titles); with `confirm: true` it performs the revert. This forward operation reuses Phase 1 forget — it is NOT a WAL rollback.
+- `/memory-revert` command (interactive): show the dry-run via `ctx.ui`, confirm, then revert.
+
+**Acceptance criteria:**
+- `npx tsc --noEmit` exits 0.
+- New `test/integration/revert.test.ts` passes: create 2 `unreviewed` auto nodes and 1 `active` reviewed node; `memory_revert` dry-run reports exactly the 2 unreviewed; `confirm:true` with default mode deactivates exactly those 2 (now absent from default recall) and leaves the active node untouched; `mode:"delete"` removes them from the graph.
+
+---
+
+### P2-010 — Extend status + maintenance for Phase 2 visibility
+
+**Depends on:** P2-002, P1-007 (maintenance), P1-014 (status)
+
+**Output:** `getMemoryStats` and `/memory-status` report queue depth, unreviewed auto-capture counts, and a compaction recommendation.
+
+**Spec:**
+- Extend `MemoryStats` with `pendingCandidates: number` (from the queue), `unreviewedNodes: number` (graph nodes with `meta.status === "unreviewed"`), and `walGrowthHint: boolean` (from `store.hasUncompactedWAL`, surfaced as a "consider compaction" recommendation).
+- `/memory-status` output gains a "Pending review: N candidate(s)", "Unreviewed auto-captured: N", and (when `walGrowthHint`) a "Run maintenance compaction" line. Still bounded; still no full record dumps.
+
+**Acceptance criteria:**
+- `npx tsc --noEmit` exits 0.
+- `test/unit/maintenance.test.ts` gains a case (fake store + injected queue count) asserting `getMemoryStats` returns the correct `pendingCandidates` and `unreviewedNodes`.
+- `npm run test:unit` and `npm run test:integration` both pass.
+
+---
+
+### P2-011 — Implement `src/llm.ts` (model adapter) — SPIKED 2026-05-30
+
+**Status:** De-risked and drafted during planning. `src/llm.ts` and `scripts/smoke-llm.ts` exist in the working tree; `npx tsc --noEmit` passes against pi-ai 0.78.0 and the smoke runs (`skipped: no model` with no key). The validated API path is recorded below. Remaining for this task: reconcile the `LlmFn` type location with P2-005 and add the testing-strategy note (folded into P2-015); the live network round-trip is validated in P2-012.
+
+**Output:** `src/llm.ts` exports a factory that adapts a Pi `ctx.model` into the `LlmFn` used by extraction. This is the only Phase 2 module that touches the real model API.
+
+**Validated API path (confirmed against installed 0.78.0):**
+- `import { completeSimple } from "@earendil-works/pi-ai"` — `completeSimple(model, context, options?) => Promise<AssistantMessage>` is the one-shot, non-streaming primitive.
+- `Context = { systemPrompt?, messages: Message[], tools? }`; a user turn is `{ role: "user", content: string, timestamp: number }`.
+- `AssistantMessage.content` is `(TextContent | ThinkingContent | ToolCall)[]`; extract text by filtering `c.type === "text"` and joining `c.text`. Check `stopReason` (`"error"`/`"aborted"` → throw).
+- Options (`SimpleStreamOptions`): `apiKey`, `headers`, `maxTokens`, `temperature`, `signal`, `reasoning?`.
+- Auth: `ctx.modelRegistry.getApiKeyAndHeaders(model) => Promise<{ ok:true; apiKey?; headers? } | { ok:false; error }>`. Standalone fallback for scripts/tests: `getEnvApiKey(provider)` + `getModels(provider)` / `getModel(provider, id)` from pi-ai.
+
+**Spec:**
+- Export `makeLlmFn(model, registry, options?): LlmFn` performing a single-shot, bounded, non-streaming completion, returning the assistant text.
+- If no model is available or auth cannot be resolved, the returned `LlmFn` rejects with a clear, catchable error (callers in P2-012 treat extraction as a no-op on failure — auto-capture must never crash a session).
+- Note: the spike defines `LlmFn` locally in `llm.ts`; P2-005 should own the canonical `LlmFn` type (or a shared `src/types.ts`) and `llm.ts` import it, so `extraction.ts` does not depend on the model adapter.
+
+**Acceptance criteria:**
+- `npx tsc --noEmit` exits 0. ✅ (passing as of the spike)
+- A guarded `npx tsx scripts/smoke-llm.ts` exists: with a provider key present it performs one tiny completion and prints non-empty text + `PASS`; with no key it prints `"skipped: no model"` and exits 0. ✅ (no-key path verified; keyed path pending a key / P2-012)
+- No network assertion in the Vitest suite — this is glue, per `test/testing-strategy.md`.
+
+---
+
+### P2-012 — Wire Phase 2 into `extensions/akg-memory.ts`
+
+**Depends on:** P2-007, P2-008, P2-009, P2-010, P2-011, P1-015
+
+**Output:** The extension opens the candidate queue, runs auto-capture on the summary hooks, applies the deterministic live-turn nudge, registers the new tools/commands, and documents validation.
+
+**Spec:**
+- On `session_start`: open the `CandidateQueue` alongside the store; build `LlmFn` via `makeLlmFn(ctx.model, ctx.modelRegistry)`.
+- On `session_compact` (if `autoCaptureEnabled` and `"compaction"` in `autoCaptureSources`): extract the compaction summary text from `event.compactionEntry`, call `runAutoCapture({ origin: "compaction", hasUI: ctx.hasUI, ... })`. Wrap in try/catch — log to stderr on failure, never crash the session.
+- On `session_tree` (if enabled and `"branch"` in sources): same, using `event.summaryEntry`, `origin: "branch"`.
+- On `agent_end`: if `settings.liveTurnNudge` and `ctx.hasUI`, emit at most one bounded `ctx.ui.notify` per session suggesting `/memory-review` when pending candidates exist. No LLM pass here.
+- Register `memory_review` and `memory_revert` tools and `/memory-review`, `/memory-revert` commands.
+- On `session_shutdown`: commit/close store and flush the queue (existing behavior preserved).
+- Add `docs/phase2-validation.md` with headings `## Hooks Fired`, `## Auto-Capture (headless)`, `## Review Flow`, `## Revert Flow`, recording an RPC-driven smoke run (compaction → unreviewed node; `/memory-review`; `/memory-revert`) and the `pi --version`.
+
+**Acceptance criteria:**
+- `npx tsc --noEmit` exits 0 for the whole project.
+- Loading the package with `pi -e ./` registers `memory_review` and `memory_revert` (verify via the in-session tool list / `getCommands`, since `--list-tools` does not exist in this Pi version).
+- A documented RPC smoke run in `docs/phase2-validation.md` shows: a forced `compact()` over RPC in a headless session produces an `unreviewed` `source:auto` node (or, with `headlessPolicy: "defer"`, a queue entry) — captured in the doc with the observed output.
+- Inducing an extraction failure (e.g. no model) leaves the session running and writes nothing to the graph.
+
+---
+
+### P2-013 — Update `skills/akg-memory/SKILL.md` for auto-capture
+
+**Depends on:** P2-012
+
+**Output:** The skill teaches the auto-capture model and the review/revert workflow.
+
+**Spec:**
+- Add sections covering: what auto-capture does (summaries only, not raw turns); what `status: "unreviewed"` / `source: "auto"` mean; how to use `memory_review` to accept/reject pending candidates; how to use `memory_revert` (dry-run first) to undo auto-captures; and that interactive sessions defer everything for human review while headless sessions may auto-commit confident candidates.
+- Reinforce the existing anti-noise guidance.
+
+**Acceptance criteria:**
+- `grep -c "memory_review\|memory_revert\|unreviewed\|auto-capture" skills/akg-memory/SKILL.md` returns 4 or more.
+- `pi -e ./` still discovers the `akg-memory` skill (loads without manifest error).
+- `wc -w skills/akg-memory/SKILL.md` is between 500 and 2500 words.
+
+---
+
+### P2-014 — Update prompt templates
+
+**Depends on:** P2-008, P2-009
+
+**Output:** `prompts/memory-review.md` reflects the real queue + `memory_review` tool; add `prompts/memory-revert.md`; refresh `prompts/memory-cleanup.md`.
+
+**Spec:**
+- `memory-review.md`: instruct the model to call `memory_review` with `action:"list"`, then accept/reject/edit each pending candidate with the user's confirmation.
+- `memory-revert.md`: instruct the model to run `memory_revert` as a dry-run, summarize what would be undone, and only revert on user confirmation.
+- `memory-cleanup.md`: add the unreviewed-auto-capture sweep to the existing duplicate/superseded curation guidance.
+
+**Acceptance criteria:**
+- `ls prompts/memory-review.md prompts/memory-revert.md prompts/memory-cleanup.md` exits 0.
+- `pi -e ./` discovers all prompt resources without error.
+- Each of the three files references at least one `memory_*` tool by name.
+
+---
+
+### P2-015 — Update `README.md` and `test/testing-strategy.md`
+
+**Depends on:** P2-012, P2-013, P2-014
+
+**Output:** Documentation reflects Phase 2.
+
+**Spec — README additions:**
+- An "Automatic capture (Phase 2)" section: hybrid extraction from compaction/branch summaries, the unreviewed→review→active lifecycle, and the headless `auto-commit` default.
+- Document the `.pi/memory-candidates.jsonl` sidecar and recommend gitignoring it alongside `.pi/memory.akg` (still no auto-editing of `.gitignore`).
+- List the new `memory_review` / `memory_revert` tools and `/memory-review` / `/memory-revert` commands.
+- Document the new settings from P2-001 with defaults.
+
+**Spec — testing-strategy additions:**
+- Document the injected-`LlmFn` fake pattern for extraction unit tests, and that `src/llm.ts` + the extension glue remain the intentional untested gap.
+
+**Acceptance criteria:**
+- `grep -c "memory_review\|memory_revert\|memory-candidates.jsonl\|auto-commit" README.md` returns 4 or more.
+- `grep "LlmFn" test/testing-strategy.md` returns a non-empty line.
+- `npm test` (full suite) passes.
+
+---
+
 ## Open Questions
 
-None — all product decisions are resolved per `PRD.md §14`. Implementation questions surfaced during P0-005 (single-writer behavior) are resolved in P0-006.
+None blocking. All Phase 0/1 product decisions are resolved per `PRD.md §14`; Phase 2 design decisions are resolved in the "Resolved Phase 2 design decisions" block above (planning session 2026-05-30). Deferred to Phase 3 by design: ranking over retrieved candidates, merge/consolidation across memory files, named memory stores/scopes, and an orchestrator-mediated review contract richer than the `memory_review` tool surface.
 
 ---
 
@@ -609,4 +950,22 @@ P1-015 (extension wiring) ← P1-004, P1-008..P1-014
 P1-016 (SKILL.md) ← P1-015
 P1-017 (prompts) [independent, can run in parallel with P1-015]
 P1-018 (README) ← P1-015, P1-016, P1-017
+
+             [Phase 2 begins after all P1 tasks]
+                            │
+P2-001 (settings+)
+P2-002 (candidate-queue) ← P2-001, P1-003
+P2-003 (provenance+) ← P1-003, P1-001
+P2-004 (dedup) ← P1-001, P1-004, P2-002
+P2-005 (extraction) ← P1-001, P2-001, P2-002, P2-003
+P2-006 (capture-policy) ← P1-005, P2-001, P2-005
+P2-007 (auto-capture) ← P2-002, P2-003, P2-004, P2-005, P2-006, P1-004, P1-008
+P2-008 (review tool+cmd) ← P2-002, P1-008, P1-004
+P2-009 (revert tool+cmd) ← P1-006, P1-011, P1-004
+P2-010 (status+maint) ← P2-002, P1-007, P1-014
+P2-011 (llm adapter) [independent]
+P2-012 (extension wiring) ← P2-007, P2-008, P2-009, P2-010, P2-011, P1-015
+P2-013 (SKILL.md) ← P2-012
+P2-014 (prompts) ← P2-008, P2-009
+P2-015 (README + testing-strategy) ← P2-012, P2-013, P2-014
 ```
