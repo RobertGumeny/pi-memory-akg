@@ -56,12 +56,27 @@ export default function akgMemoryExtension(pi: ExtensionAPI) {
 		summaryText: string,
 		origin: "compaction" | "branch",
 		summaryEntryId: string | undefined,
-		ctx: { cwd: string; hasUI: boolean; signal: AbortSignal | undefined },
+		ctx: {
+			cwd: string;
+			hasUI: boolean;
+			signal: AbortSignal | undefined;
+			sessionManager: { getSessionId(): string };
+		},
 	): Promise<void> {
 		if (!settings.autoCaptureEnabled) return;
 		if (!store?.isOpen || !queue || !llm) return;
 		if (!settings.autoCaptureSources.includes(origin)) return;
 		if (!summaryText.trim()) return;
+
+		// Stamp the session id so `memory_revert`/`findUnreviewed` can narrow by
+		// session. getSessionId() can throw for an unsaved/ephemeral session, so
+		// fall back to undefined (provenance omits it).
+		let sessionId: string | undefined;
+		try {
+			sessionId = ctx.sessionManager.getSessionId();
+		} catch {
+			sessionId = undefined;
+		}
 
 		try {
 			const report = await runAutoCapture({
@@ -69,7 +84,7 @@ export default function akgMemoryExtension(pi: ExtensionAPI) {
 				queue,
 				summaryText,
 				origin,
-				provenanceBase: { cwd: ctx.cwd, summaryEntryId },
+				provenanceBase: { cwd: ctx.cwd, sessionId, summaryEntryId },
 				llm,
 				settings,
 				hasUI: ctx.hasUI,
