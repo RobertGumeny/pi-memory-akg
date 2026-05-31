@@ -528,6 +528,13 @@ Exit criteria:
 - **Headless / RPC sessions** default to **risk-gated auto-commit** (confident + safe candidates write as `status: unreviewed`, `source: auto`; sensitive/low-confidence defer to the queue). Interactive sessions defer everything for human review. Governed by a `headlessPolicy` setting.
 - Because `akg-ts` has no selective commit, capture is **gate-then-write**: the `.akg` graph only ever contains memories that passed the gate, and "revert" is a forward forget operation, not a WAL rollback.
 
+**Delivery — Phase 2 ships as two sequential epics** (task IDs in `TASKS.md`):
+
+- **Epic 1 — Capture pipeline (P2-001 … P2-007).** Settings, the sidecar candidate queue, auto-capture provenance, dedup, the LLM extraction pass, the capture-policy gate, and the auto-capture orchestration. This is the *engine* that turns a distilled summary into committed/deferred candidates. It is fully unit- and integration-testable with a **faked `LlmFn`** — no live model or Pi wiring is needed to land and verify it.
+- **Epic 2 — Control surface & integration (P2-008 … P2-015).** The review and revert tools/commands, the status/maintenance extensions, the live model adapter (`src/llm.ts`), the extension hook wiring plus the live-turn nudge, and the skill/prompts/README/testing-strategy updates. This is the user/operator-facing *control layer* plus everything that wires the engine into a running Pi session and documents it.
+
+Epic 1 must complete before Epic 2 (Epic 2's surfaces and wiring consume the Epic 1 modules). The live model adapter and Pi-runtime validation live in Epic 2 by design, so the engine can be proven in isolation first.
+
 ### Phase 3: richer retrieval and long-term maintenance
 
 Outcome: Memory remains useful as the graph grows.

@@ -50,6 +50,14 @@ export const META_STATUS = "status" as const;
 export const META_CONFIDENCE_REASON = "confidence_reason" as const;
 export const META_LAST_SEEN_AT = "last_seen_at" as const;
 
+// Status values written to a node's `status` metadata field.
+// Auto-captured (Phase 2) memories land as "unreviewed" until a human or
+// the review surface promotes them to "active" (or reverts them).
+export const STATUS_ACTIVE = "active" as const;
+export const STATUS_INACTIVE = "inactive" as const;
+export const STATUS_SUPERSEDED = "superseded" as const;
+export const STATUS_UNREVIEWED = "unreviewed" as const;
+
 export const METADATA_FIELDS = [
 	META_CWD,
 	META_SESSION_ID,

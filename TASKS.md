@@ -4,7 +4,7 @@ Source: `PRD.md` (Status: Implementation-ready, 2026-05-28)
 Phases in scope: Phase 0 (baseline validation), Phase 1 (explicit memory tools), and Phase 2 (selective automatic extraction).  
 Phase 3 is documented in `PRD.md §12` but not broken down here.
 
-**Status:** Phase 0 (P0-001..006) and Phase 1 (P1-001..018) are complete, with a Vitest unit + integration baseline in place. Phase 2 (P2-001..015) is the new batch below.
+**Status:** Phase 0 (P0-001..006) and Phase 1 (P1-001..018) are complete, with a Vitest unit + integration baseline in place. **Phase 2 · Epic 1 — Capture pipeline (P2-001..007) is complete** (settings, sidecar candidate queue, auto-capture provenance, dedup, LLM extraction, capture-policy gate, and auto-capture orchestration; all unit/integration-tested with a faked `LlmFn`). Phase 2 · Epic 2 (P2-008..015) remains the next batch.
 
 **Toolchain note (validated 2026-05-30):** Running Pi is **0.78.0**; `@earendil-works/pi-coding-agent` and `@earendil-works/pi-ai` are installed as devDependencies at `^0.78.0` so types resolve. The test runner is **Vitest** (`npm test`, `npm run test:unit`, `npm run test:integration`). Standalone scripts run under `npx tsx`; type-check with `npx tsc --noEmit`. **`node --loader ts-node/esm` does NOT work in this repo** — do not use it in acceptance criteria (the Phase 1 criteria that reference it are superseded by Vitest/tsx).
 
@@ -583,6 +583,13 @@ Exit criteria: memory survives across Pi sessions; recall improves continuity wi
 
 **Depends on:** All Phase 1 tasks complete (the six tools, store lifecycle, retrieval, risk-policy, maintenance, and the Vitest baseline).
 
+**Delivered as two sequential epics** (see `PRD.md §12`):
+
+- **Epic 1 — Capture pipeline (P2-001 … P2-007):** the engine that turns a distilled summary into committed/deferred candidates. Fully testable with a faked `LlmFn`; no live model or Pi wiring required.
+- **Epic 2 — Control surface & integration (P2-008 … P2-015):** review/revert tools + commands, status/maintenance, the live model adapter, extension hook wiring + nudge, and docs.
+
+Epic 1 must complete before Epic 2 (Epic 2 consumes the Epic 1 modules).
+
 ### Resolved Phase 2 design decisions
 
 These were resolved in the planning session of 2026-05-30 and govern every task below. They extend, and where noted reinterpret, `PRD.md §12`:
@@ -597,6 +604,10 @@ These were resolved in the planning session of 2026-05-30 and govern every task 
 Exit criteria (from `PRD.md §12`): automatic capture produces useful low-noise candidates; memory stays compact and curated; and — added this phase — capture is transparent and reversible in both interactive and headless modes.
 
 ---
+
+## Phase 2 · Epic 1 — Capture pipeline (P2-001 … P2-007)
+
+*The extraction + capture engine. Fully unit/integration-testable with a faked `LlmFn`. Must complete before Epic 2.*
 
 ### P2-001 — Extend `src/settings.ts` with auto-capture settings
 
@@ -756,6 +767,10 @@ Exit criteria (from `PRD.md §12`): automatic capture produces useful low-noise 
   - re-running the same extraction twice does not create a duplicate graph node (dedup `"update"`/`"duplicate"` path).
 
 ---
+
+## Phase 2 · Epic 2 — Control surface & integration (P2-008 … P2-015)
+
+*Review/revert surfaces, the live model adapter, Pi hook wiring + nudge, and docs. Consumes the Epic 1 modules.*
 
 ### P2-008 — Implement review surface: `memory_review` tool + `/memory-review` command
 
@@ -953,6 +968,7 @@ P1-018 (README) ← P1-015, P1-016, P1-017
 
              [Phase 2 begins after all P1 tasks]
                             │
+── Epic 1: Capture pipeline ──
 P2-001 (settings+)
 P2-002 (candidate-queue) ← P2-001, P1-003
 P2-003 (provenance+) ← P1-003, P1-001
@@ -960,6 +976,7 @@ P2-004 (dedup) ← P1-001, P1-004, P2-002
 P2-005 (extraction) ← P1-001, P2-001, P2-002, P2-003
 P2-006 (capture-policy) ← P1-005, P2-001, P2-005
 P2-007 (auto-capture) ← P2-002, P2-003, P2-004, P2-005, P2-006, P1-004, P1-008
+── Epic 2: Control surface & integration ──  [starts after Epic 1 complete]
 P2-008 (review tool+cmd) ← P2-002, P1-008, P1-004
 P2-009 (revert tool+cmd) ← P1-006, P1-011, P1-004
 P2-010 (status+maint) ← P2-002, P1-007, P1-014

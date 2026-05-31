@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { buildProvenance, mergeProvenance } from "../../src/provenance.js";
+import {
+	buildAutoProvenance,
+	buildProvenance,
+	mergeProvenance,
+} from "../../src/provenance.js";
 
 const NOW_ISO = "2026-05-30T12:00:00.000Z";
 
@@ -40,6 +44,32 @@ describe("provenance", () => {
 				{ source: "x" },
 			);
 			expect(merged.last_seen_at).toBe(NOW_ISO);
+		});
+	});
+
+	describe("buildAutoProvenance", () => {
+		it("stamps auto source, origin, confidence, and the current time", () => {
+			const p = buildAutoProvenance({ origin: "compaction", confidence: 0.8 });
+			expect(p.source).toBe("auto");
+			expect(p.origin).toBe("compaction");
+			expect(p.confidence).toBe(0.8);
+			expect(p.last_seen_at).toBe(NOW_ISO);
+		});
+
+		it("omits fields that were not provided", () => {
+			const p = buildAutoProvenance({ origin: "branch", confidence: 0.5 });
+			expect("session_id" in p).toBe(false);
+			expect("summary_entry_id" in p).toBe(false);
+			expect("cwd" in p).toBe(false);
+		});
+
+		it("includes the summary entry id when provided", () => {
+			const p = buildAutoProvenance({
+				origin: "compaction",
+				confidence: 0.9,
+				summaryEntryId: "entry-42",
+			});
+			expect(p.summary_entry_id).toBe("entry-42");
 		});
 	});
 
