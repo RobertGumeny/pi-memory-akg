@@ -9,12 +9,12 @@
  */
 import { completeSimple } from "@earendil-works/pi-ai";
 import type { Api, AssistantMessage, Context, Model, TextContent } from "@earendil-works/pi-ai";
+import type { LlmFn } from "./extraction.js";
 
-/**
- * Injected completion function. A single string in, the model's text out.
- * `src/extraction.ts` depends on this shape, not on pi-ai, so it can be faked in tests.
- */
-export type LlmFn = (prompt: string, opts?: { signal?: AbortSignal }) => Promise<string>;
+// `LlmFn` is owned by `src/extraction.ts` (P2-005) so extraction never depends on
+// this model adapter. Re-exported here for the convenience of P2-012 glue, which
+// imports both `makeLlmFn` and the type from one place.
+export type { LlmFn };
 
 /**
  * Structural slice of Pi's `ModelRegistry` (from `ctx.modelRegistry`) that we need.

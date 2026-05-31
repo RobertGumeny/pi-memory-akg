@@ -18,6 +18,7 @@ Look for:
 3. **Stale tasks** — tasks with status still active that appear to have been completed based on other records or session context.
 4. **Orphaned records** — records with no edges that might benefit from being linked to related records.
 5. **Low-signal records** — records whose body is essentially empty or that duplicate information already in other records.
+6. **Unreviewed auto-captures** — records with `status: "unreviewed"` and `source: "auto"` that were written by headless auto-capture and never triaged. Call `memory_recall({ status: "unreviewed" })` to find them. Each one should be either accepted (kept) or swept. Use `memory_revert({})` for a dry-run sweep of all unreviewed auto-captures, and `memory_review({ action: "list" })` to see any still-pending (un-committed) candidates in the queue.
 
 **Step 3 — Propose actions, do not auto-execute**
 

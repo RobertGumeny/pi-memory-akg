@@ -23,6 +23,27 @@ transformation functions, in isolation. One test file per unit under test:
   budget and truncation behavior.
 - `provenance`, `settings`, `maintenance` (stats + duplicate grouping), and the
   pure helpers `slugify` / `parseRef` / `parseCallerProvenance`.
+- **Phase 2 capture pipeline** — `dedup` (`classifyCandidate`), `capture-policy`
+  (`routeCandidate`), and `extraction` (`extractCandidates`). The auto-capture
+  settings additions are covered in `settings`, the auto-provenance helper in
+  `provenance`.
+
+### The injected `LlmFn` pattern (Phase 2 extraction)
+
+Deciding *what* is worth extracting from a free-form summary is a model judgment,
+so `extractCandidates` takes an `LlmFn` (`(prompt, opts?) => Promise<string>`) as
+a dependency-injected parameter. Unit tests pass a **fake `LlmFn`** — a function
+that returns a canned string — and assert the *deterministic* behavior around the
+model: JSON/code-fence parsing, per-item validation (drop bad `type`, empty
+`title`/`body`, out-of-range `confidence`), the `maxCandidatesPerExtraction` cap,
+provenance stamping, and the `[]`-on-malformed / `[]`-on-reject contracts. No
+network, no real model. The `auto-capture` integration test wires the same fake
+`LlmFn` to a real store + real queue to prove the full extract → dedup → gate →
+commit/defer pipeline end-to-end.
+
+The thin adapter that binds a real Pi `ctx.model` to an `LlmFn` lives in
+`src/llm.ts` and is intentionally **not** Vitest-tested (see "What we deliberately
+do not test"); it is exercised by the guarded `scripts/smoke-llm.ts`.
 
 Conventions:
 
@@ -63,8 +84,11 @@ Conventions:
   `NODE_TYPES.includes("decision")` tests nothing real.
 - **Exact output formatting** beyond what behavior requires — brittle, low value.
 - **The Pi extension glue** (`extensions/akg-memory.ts`: session lifecycle, hint
-  injection, tool registration) — framework wiring that would require mocking the
-  Pi runtime for little payoff. This is a known, intentional gap.
+  injection, tool registration, the auto-capture hook wiring and live-turn nudge)
+  and **the model adapter** (`src/llm.ts`: binding `ctx.model` to an `LlmFn`) —
+  framework/runtime wiring that would require mocking the Pi runtime or hitting a
+  real model for little payoff. This is a known, intentional gap, validated
+  manually in `docs/phase2-validation.md` and `scripts/smoke-llm.ts`.
 
 ## Planned before release (after Phase 3)
 

@@ -3,6 +3,9 @@ import { Type, StringEnum } from "@earendil-works/pi-ai";
 import { MemoryStore } from "../src/memory-store.js";
 import { loadSettings } from "../src/settings.js";
 import { NODE_TYPES, RELATION_TYPES } from "../src/schema.js";
+import { CandidateQueue } from "../src/candidate-queue.js";
+import { runAutoCapture } from "../src/auto-capture.js";
+import { makeLlmFn, type LlmFn } from "../src/llm.js";
 import { handleRemember } from "../src/tools/remember.js";
 import { handleRecall } from "../src/tools/recall.js";
 import { handleLink } from "../src/tools/link.js";
@@ -10,6 +13,8 @@ import { handleForget } from "../src/tools/forget.js";
 import { handleRecent } from "../src/tools/recent.js";
 import { handleInspect } from "../src/tools/inspect.js";
 import { handleStatus } from "../src/tools/status.js";
+import { handleReview, runInteractiveReview } from "../src/tools/review.js";
+import { handleRevert, runInteractiveRevert, type RevertMode } from "../src/tools/revert.js";
 
 const HINT_TEXT =
 	"Project AKG memory is available at .pi/memory.akg. Use memory_recall, memory_recent, or memory_inspect when durable project context may affect this task.";
@@ -19,17 +24,98 @@ const MEMORY_UNAVAILABLE = "Memory is not available: store failed to initialize.
 export default function akgMemoryExtension(pi: ExtensionAPI) {
 	const settings = loadSettings();
 	let store: MemoryStore | null = null;
+	let queue: CandidateQueue | null = null;
+	let llm: LlmFn | null = null;
+	let nudgedThisSession = false;
 
 	pi.on("session_start", async (_event, ctx) => {
 		try {
 			store = await MemoryStore.open(ctx.cwd, settings);
-			process.stderr.write(`[akg-memory] session_start fired: opened ${store.filePath}\n`);
+			queue = CandidateQueue.open(ctx.cwd, settings);
+			llm = makeLlmFn(ctx.model, ctx.modelRegistry);
+			nudgedThisSession = false;
+			process.stderr.write(
+				`[akg-memory] session_start fired: opened ${store.filePath}, queue ${queue.filePath}\n`,
+			);
 		} catch (err) {
 			process.stderr.write(
 				`[akg-memory] session_start error — memory disabled: ${(err as Error).message}\n`,
 			);
 			store = null;
+			queue = null;
+			llm = null;
 		}
+	});
+
+	/**
+	 * Run the auto-capture pipeline over one distilled summary. Fully guarded:
+	 * a model failure or any pipeline error is logged and swallowed — auto-capture
+	 * must never crash a session (gate-then-write, so the graph stays consistent).
+	 */
+	async function captureFromSummary(
+		summaryText: string,
+		origin: "compaction" | "branch",
+		summaryEntryId: string | undefined,
+		ctx: { cwd: string; hasUI: boolean; signal: AbortSignal | undefined },
+	): Promise<void> {
+		if (!settings.autoCaptureEnabled) return;
+		if (!store?.isOpen || !queue || !llm) return;
+		if (!settings.autoCaptureSources.includes(origin)) return;
+		if (!summaryText.trim()) return;
+
+		try {
+			const report = await runAutoCapture({
+				store,
+				queue,
+				summaryText,
+				origin,
+				provenanceBase: { cwd: ctx.cwd, summaryEntryId },
+				llm,
+				settings,
+				hasUI: ctx.hasUI,
+				signal: ctx.signal,
+			});
+			process.stderr.write(
+				`[akg-memory] auto-capture (${origin}): committed ${report.committed.length}, ` +
+					`deferred ${report.deferred.length}, dropped ${report.dropped}, duplicates ${report.duplicates}\n`,
+			);
+		} catch (err) {
+			process.stderr.write(
+				`[akg-memory] auto-capture (${origin}) error — skipped: ${(err as Error).message}\n`,
+			);
+		}
+	}
+
+	pi.on("session_compact", async (event, ctx) => {
+		await captureFromSummary(
+			event.compactionEntry.summary,
+			"compaction",
+			event.compactionEntry.id,
+			ctx,
+		);
+	});
+
+	pi.on("session_tree", async (event, ctx) => {
+		if (!event.summaryEntry) return;
+		await captureFromSummary(
+			event.summaryEntry.summary,
+			"branch",
+			event.summaryEntry.id,
+			ctx,
+		);
+	});
+
+	pi.on("agent_end", async (_event, ctx) => {
+		// Deterministic live-turn nudge: no LLM pass. At most one notify per session,
+		// only when opted in, UI is present, and there are pending candidates to review.
+		if (!settings.liveTurnNudge || !ctx.hasUI || nudgedThisSession || !queue) return;
+		const pending = queue.list().length;
+		if (pending === 0) return;
+		nudgedThisSession = true;
+		ctx.ui.notify(
+			`AKG memory: ${pending} pending candidate(s). Run /memory-review to triage them.`,
+			"info",
+		);
 	});
 
 	pi.on("before_agent_start", async (event, _ctx) => {
@@ -63,6 +149,10 @@ export default function akgMemoryExtension(pi: ExtensionAPI) {
 		} else {
 			process.stderr.write("[akg-memory] session_shutdown fired\n");
 		}
+		// The candidate queue is durable per-append (JSONL fsync), so there is
+		// nothing to flush — just drop the references.
+		queue = null;
+		llm = null;
 	});
 
 	// ── memory_remember ──────────────────────────────────────────────────────────
@@ -248,12 +338,111 @@ export default function akgMemoryExtension(pi: ExtensionAPI) {
 		},
 	});
 
+	// ── memory_review ────────────────────────────────────────────────────────────
+	pi.registerTool({
+		name: "memory_review",
+		label: "Memory Review",
+		description:
+			"List, accept, or reject pending auto-captured memory candidates in the review queue. " +
+			"Accepting promotes a candidate to an active memory record (with optional edits); rejecting discards it.",
+		parameters: Type.Object({
+			action: StringEnum(["list", "accept", "reject"] as string[], {
+				description: "list pending candidates, or accept/reject a candidate by id",
+			}),
+			id: Type.Optional(
+				Type.String({ description: "Candidate queue id (required for accept/reject)" }),
+			),
+			edits: Type.Optional(
+				Type.Object(
+					{
+						type: Type.Optional(StringEnum([...NODE_TYPES] as string[])),
+						title: Type.Optional(Type.String()),
+						body: Type.Optional(Type.String()),
+						tags: Type.Optional(Type.Array(Type.String())),
+					},
+					{ description: "Optional edits applied when accepting a candidate" },
+				),
+			),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+			if (!store?.isOpen || !queue) {
+				return { content: [{ type: "text", text: MEMORY_UNAVAILABLE }], details: {} };
+			}
+			const text = await handleReview(
+				queue,
+				store,
+				settings,
+				params as Parameters<typeof handleReview>[3],
+			);
+			return { content: [{ type: "text", text }], details: {} };
+		},
+	});
+
+	// ── memory_revert ────────────────────────────────────────────────────────────
+	pi.registerTool({
+		name: "memory_revert",
+		label: "Memory Revert",
+		description:
+			"Sweep auto-captured 'unreviewed' memories. Without confirm it is a dry run (lists what would be undone); " +
+			"with confirm: true it deactivates (or deletes) them. A forward forget, not a rollback.",
+		parameters: Type.Object({
+			mode: Type.Optional(
+				StringEnum(["deactivate", "delete"] as string[], {
+					description: "deactivate (default) sets status inactive; delete cascade-removes",
+				}),
+			),
+			origin: Type.Optional(
+				StringEnum(["compaction", "branch"] as string[], {
+					description: "Only revert captures from this origin",
+				}),
+			),
+			sinceMs: Type.Optional(
+				Type.Number({ description: "Only revert nodes updated within the last N milliseconds" }),
+			),
+			confirm: Type.Optional(
+				Type.Boolean({ description: "Set true to apply the revert (otherwise dry run)" }),
+			),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+			if (!store?.isOpen) {
+				return { content: [{ type: "text", text: MEMORY_UNAVAILABLE }], details: {} };
+			}
+			const text = await handleRevert(store, params as Parameters<typeof handleRevert>[1]);
+			return { content: [{ type: "text", text }], details: {} };
+		},
+	});
+
 	// ── /memory-status command ───────────────────────────────────────────────────
 	pi.registerCommand("memory-status", {
 		description: "Show AKG memory package status: file path, counts by type/status, recent titles, available tools",
 		handler: async (_args, ctx) => {
-			const text = await handleStatus(store, settings);
+			const text = await handleStatus(store, settings, queue?.list().length ?? 0);
 			ctx.ui.notify(text, "info");
+		},
+	});
+
+	// ── /memory-review command ───────────────────────────────────────────────────
+	pi.registerCommand("memory-review", {
+		description: "Walk pending auto-captured memory candidates and accept/reject each",
+		handler: async (_args, ctx) => {
+			if (!store?.isOpen || !queue) {
+				ctx.ui.notify(MEMORY_UNAVAILABLE, "error");
+				return;
+			}
+			await runInteractiveReview(queue, store, ctx.ui, ctx.hasUI);
+		},
+	});
+
+	// ── /memory-revert command ───────────────────────────────────────────────────
+	pi.registerCommand("memory-revert", {
+		description: "Dry-run then revert auto-captured unreviewed memories",
+		handler: async (args, ctx) => {
+			if (!store?.isOpen) {
+				ctx.ui.notify(MEMORY_UNAVAILABLE, "error");
+				return;
+			}
+			const mode: RevertMode = args?.trim() === "delete" ? "delete" : "deactivate";
+			await runInteractiveRevert(store, ctx.ui, ctx.hasUI, { mode });
 		},
 	});
 }

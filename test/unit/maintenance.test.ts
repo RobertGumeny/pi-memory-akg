@@ -30,6 +30,28 @@ describe("getMemoryStats", () => {
 		expect(stats.countsByType).toEqual({});
 		expect(stats.recentTitles).toEqual([]);
 	});
+
+	it("reports pendingCandidates (injected) and unreviewedNodes (from the graph)", async () => {
+		const store = makeFakeStore({
+			nodes: [
+				makeNode({ type: "decision", id: "u1", title: "U1", meta: { status: "unreviewed" } }),
+				makeNode({ type: "decision", id: "u2", title: "U2", meta: { status: "unreviewed" } }),
+				makeNode({ type: "task", id: "a1", title: "A1", meta: { status: "active" } }),
+			],
+		});
+
+		const stats = await getMemoryStats(store, { pendingCandidates: 3 });
+		expect(stats.pendingCandidates).toBe(3);
+		expect(stats.unreviewedNodes).toBe(2);
+		// The unit fake omits hasUncompactedWAL → no compaction hint.
+		expect(stats.walGrowthHint).toBe(false);
+	});
+
+	it("defaults pendingCandidates to 0 when not injected", async () => {
+		const stats = await getMemoryStats(makeFakeStore());
+		expect(stats.pendingCandidates).toBe(0);
+		expect(stats.unreviewedNodes).toBe(0);
+	});
 });
 
 describe("findDuplicateCandidates", () => {

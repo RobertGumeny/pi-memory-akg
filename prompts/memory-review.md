@@ -3,7 +3,22 @@ name: memory-review
 description: End-of-session memory review — identify durable facts from this session and propose memory_remember calls for user confirmation.
 ---
 
-Guide the user through a session-end memory review to capture durable facts before the session ends.
+Guide the user through a memory review: first triage anything auto-capture queued, then capture durable facts from this session that were missed.
+
+**Step 0 — Triage the auto-capture queue**
+
+Call `memory_review({ action: "list" })` to see candidates that auto-capture
+queued from compaction/branch summaries (these are pending, not yet in the
+graph). For each candidate, present it to the user and act on their choice:
+
+- accept as-is → `memory_review({ action: "accept", id })`
+- accept with a fix → `memory_review({ action: "accept", id, edits: { title, body, tags } })`
+- discard → `memory_review({ action: "reject", id })`
+
+Apply the same bar as manual memory: skip raw output, transient state, and
+low-signal items. If the list is empty, move on. (Auto-captured records already
+written to the graph in headless mode show up with `status: unreviewed` — use
+`memory_revert` / the `/memory-revert` prompt to sweep those.)
 
 **Step 1 — Orient**
 

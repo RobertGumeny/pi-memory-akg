@@ -9,11 +9,14 @@ const AVAILABLE_TOOLS = [
 	"memory_forget",
 	"memory_recent",
 	"memory_inspect",
+	"memory_review",
+	"memory_revert",
 ];
 
 export async function handleStatus(
 	store: MemoryStore | null,
 	settings: Settings,
+	pendingCandidates = 0,
 ): Promise<string> {
 	if (!store?.isOpen) {
 		return [
@@ -24,7 +27,7 @@ export async function handleStatus(
 		].join("\n");
 	}
 
-	const stats = await getMemoryStats(store);
+	const stats = await getMemoryStats(store, { pendingCandidates });
 
 	const countsByTypeLines = Object.entries(stats.countsByType)
 		.map(([t, n]) => `  ${t}: ${n}`)
@@ -58,15 +61,27 @@ export async function handleStatus(
 		`Recent memory titles (last 5):`,
 		recentTitlesLines,
 		``,
+		`Auto-capture: ${settings.autoCaptureEnabled ? "enabled" : "disabled"} (headless policy: ${settings.headlessPolicy})`,
+		`Pending review: ${stats.pendingCandidates} candidate(s) in ${settings.candidateQueuePath}`,
+		`Unreviewed auto-captured: ${stats.unreviewedNodes}`,
+		...(stats.walGrowthHint
+			? [`Maintenance: uncompacted WAL present — run maintenance compaction (store.compact()).`]
+			: []),
+		``,
 		`Available tools:`,
 		AVAILABLE_TOOLS.map((t) => `  ${t}`).join("\n"),
 		``,
-		`Recommendation: add .pi/memory.akg to .gitignore for private/local memory.`,
+		`Recommendation: add .pi/memory.akg (and .pi/memory-candidates.jsonl) to .gitignore for private/local memory.`,
 		``,
 		`Suggested next actions:`,
 		`  Run memory_recall to explore existing memories.`,
 		`  Run memory_remember to store a new durable fact.`,
-		`  Run memory_recent to see what was updated most recently.`,
+		...(stats.pendingCandidates > 0
+			? ["  Run /memory-review (or memory_review) to triage pending candidates."]
+			: []),
+		...(stats.unreviewedNodes > 0
+			? ["  Run /memory-revert (or memory_revert) to sweep unreviewed auto-captures."]
+			: []),
 	];
 
 	const result = lines.join("\n");

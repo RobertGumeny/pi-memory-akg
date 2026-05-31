@@ -82,6 +82,39 @@ Call when you want to see what was last worked on — useful at the start of a s
 ### memory_inspect
 Call when `memory_recall` returns a record that looks relevant and you need its full body, metadata, and edges. Do not inspect records speculatively — check the recall summary first.
 
+### memory_review
+Call to triage the pending auto-capture queue. `action: "list"` shows pending candidates; `action: "accept"` (with an `id`, and optional `edits` to fix the title/body/type/tags) promotes a candidate to an `active` memory record; `action: "reject"` discards it. Prefer editing a slightly-wrong candidate over rejecting and re-authoring it. The `/memory-review` command walks the queue interactively.
+
+### memory_revert
+Call to undo auto-captured memories that should not have been written. Always run it as a **dry run first** (no `confirm`) to see exactly what would be affected, then re-run with `confirm: true`. Default mode `deactivate` keeps the records inspectable; `delete` removes them. Narrow the sweep with `origin` (`compaction`/`branch`) or `sinceMs`. This is a forward forget, not a rollback.
+
+---
+
+## Automatic capture (Phase 2)
+
+The package can capture durable memories **automatically**, but only from Pi's
+already-distilled summaries — never from raw turns:
+
+- **Sources are summaries only.** A bounded LLM extraction pass runs on Pi
+  compaction summaries (`session_compact`) and branch summaries (`session_tree`).
+  Raw completed turns are *not* auto-extracted; at most they trigger an opt-in,
+  deterministic `/memory-review` nudge. This keeps auto-capture low-noise.
+- **`status: "unreviewed"` + `source: "auto"`** mark every auto-captured node.
+  They are visible to recall but flagged as not-yet-human-reviewed. Promote them
+  to `active` via `memory_review` (accept), or sweep them with `memory_revert`.
+- **Interactive sessions defer everything.** When a human is present
+  (`hasUI`), nothing auto-commits — confident candidates wait in the pending
+  queue for review. **Headless sessions** (orchestrator/RPC) may auto-commit
+  *confident and safe* candidates as `unreviewed`; sensitive, secret-like, or
+  low-confidence ones always defer to the queue.
+- **The queue lives outside the graph**, in `.pi/memory-candidates.jsonl`.
+  Deferred candidates are *not* in the `.akg` file until accepted.
+
+When you see `unreviewed`/`source: auto` records, treat them as suggestions:
+inspect, then accept (with edits if needed) or revert. Apply the same
+selective-memory and anti-noise rules above — auto-capture does not lower the bar
+for what deserves to be remembered.
+
 ---
 
 ## Keeping memory compact

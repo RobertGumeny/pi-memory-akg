@@ -1,5 +1,5 @@
 import type { MemoryStore } from "./memory-store.js";
-import { META_STATUS } from "./schema.js";
+import { META_STATUS, STATUS_UNREVIEWED } from "./schema.js";
 
 export interface MemoryStats {
 	totalNodes: number;
@@ -7,6 +7,10 @@ export interface MemoryStats {
 	countsByStatus: Record<string, number>;
 	recentTitles: string[];
 	filePath: string;
+	// Phase 2 visibility (P2-010)
+	pendingCandidates: number; // sidecar queue depth
+	unreviewedNodes: number; // graph nodes with status === "unreviewed"
+	walGrowthHint: boolean; // store has an uncompacted WAL → suggest compaction
 }
 
 export interface DuplicateCandidate {
@@ -15,21 +19,31 @@ export interface DuplicateCandidate {
 	nodeIds: string[];
 }
 
-export async function getMemoryStats(store: MemoryStore): Promise<MemoryStats> {
+export async function getMemoryStats(
+	store: MemoryStore,
+	opts: { pendingCandidates?: number } = {},
+): Promise<MemoryStats> {
 	const s = store.store;
 	const nodes = s.listNodes();
 
 	const countsByType: Record<string, number> = {};
 	const countsByStatus: Record<string, number> = {};
+	let unreviewedNodes = 0;
 
 	for (const node of nodes) {
 		countsByType[node.type] = (countsByType[node.type] ?? 0) + 1;
 		const status = (node.meta[META_STATUS] as string | undefined) ?? "active";
 		countsByStatus[status] = (countsByStatus[status] ?? 0) + 1;
+		if (status === STATUS_UNREVIEWED) unreviewedNodes += 1;
 	}
 
 	const sorted = [...nodes].sort((a, b) => b.updatedAt - a.updatedAt);
 	const recentTitles = sorted.slice(0, 5).map((n) => n.title);
+
+	// `hasUncompactedWAL` is a real Store getter; the unit fake omits it → false.
+	const walGrowthHint = Boolean(
+		(s as { hasUncompactedWAL?: boolean }).hasUncompactedWAL,
+	);
 
 	return {
 		totalNodes: nodes.length,
@@ -37,6 +51,9 @@ export async function getMemoryStats(store: MemoryStore): Promise<MemoryStats> {
 		countsByStatus,
 		recentTitles,
 		filePath: store.filePath,
+		pendingCandidates: opts.pendingCandidates ?? 0,
+		unreviewedNodes,
+		walGrowthHint,
 	};
 }
 

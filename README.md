@@ -22,13 +22,19 @@ The package creates a per-project memory file at:
 .pi/memory.akg
 ```
 
-This file is project-local and portable. For private/local memory, add it to `.gitignore`:
+Phase 2 auto-capture also keeps a sidecar review queue (pending candidates, not yet in the graph) at:
 
 ```
-echo ".pi/memory.akg" >> .gitignore
+.pi/memory-candidates.jsonl
 ```
 
-For shared team memory, intentionally omit it from `.gitignore` and commit it. The package never modifies `.gitignore` automatically.
+These files are project-local and portable. For private/local memory, add both to `.gitignore`:
+
+```
+printf '%s\n' '.pi/memory.akg' '.pi/memory-candidates.jsonl' >> .gitignore
+```
+
+For shared team memory, intentionally omit `.pi/memory.akg` from `.gitignore` and commit it. The package never modifies `.gitignore` automatically.
 
 ## What gets stored
 
@@ -46,20 +52,57 @@ Pi JSONL session files remain the source of truth for exact conversation history
 | `memory_forget` | Deactivate, supersede, or delete a memory record |
 | `memory_recent` | List recently updated records ordered by update time |
 | `memory_inspect` | Inspect full details and edges for a specific record by ID |
+| `memory_review` | List/accept/reject pending auto-captured candidates from the review queue |
+| `memory_revert` | Dry-run then deactivate/delete auto-captured `unreviewed` memories |
 
-## Slash prompts
+## Commands & slash prompts
 
-| Prompt | Purpose |
+| Command / prompt | Purpose |
 |--------|---------|
-| `/memory-status` | Interpret current memory state — counts, recent titles, next actions |
-| `/memory-review` | End-of-session review: identify and propose new durable facts to store |
-| `/memory-cleanup` | Curation pass: identify duplicates, stale tasks, and superseded records |
+| `/memory-status` | Deterministic memory status — file path, counts, queue depth, unreviewed count, next actions |
+| `/memory-review` | Walk the pending auto-capture queue and accept/reject each candidate |
+| `/memory-revert` | Dry-run then revert auto-captured `unreviewed` memories |
+| `/memory-cleanup` | Curation pass: duplicates, stale tasks, superseded records, unreviewed sweeps |
+
+## Automatic capture (Phase 2)
+
+The package can capture durable memories automatically — but only from Pi's
+already-distilled **compaction and branch summaries**, never from raw turns. A
+bounded LLM pass extracts candidate facts; deterministic plumbing (dedup,
+provenance, the queue, revert) keeps it transparent and reversible.
+
+Lifecycle: a captured memory is `unreviewed` → you **review** it (accept → it
+becomes `active`, or reject) → or you **revert** it (a forward forget, not a
+rollback).
+
+- **Interactive sessions defer everything** for human review — nothing
+  auto-commits. Confident candidates wait in `.pi/memory-candidates.jsonl`.
+- **Headless / RPC sessions default to `auto-commit`**: confident *and* safe
+  candidates write straight to the graph as `status: "unreviewed"`,
+  `source: "auto"`, with full provenance; sensitive or low-confidence ones defer
+  to the queue. An orchestrator can audit via the RPC stream and bulk-revert.
+
+### Settings (defaults)
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `autoCaptureEnabled` | `true` | Master switch for auto-capture |
+| `autoCaptureSources` | `["compaction", "branch"]` | Which summaries to extract from |
+| `headlessPolicy` | `"auto-commit"` | Headless behavior: `auto-commit` \| `defer` \| `off` |
+| `candidateQueuePath` | `.pi/memory-candidates.jsonl` | Sidecar pending-queue path |
+| `autoCommitMinConfidence` | `0.7` | Min confidence to auto-commit (headless) |
+| `dropBelowConfidence` | `0.3` | Candidates below this are discarded, not queued |
+| `maxCandidatesPerExtraction` | `10` | Cap per summary |
+| `liveTurnNudge` | `false` | Opt-in `/memory-review` nudge after a turn (no LLM pass) |
+
+Phase 1 settings (`hintEnabled`, `hintBudget`, `toolResultBudget`,
+`requireConfirmationForAll`, `memoryFilePath`) are unchanged.
 
 ## Roadmap
 
 - **Phase 0** (complete) — SDK and Pi package baseline validation
 - **Phase 1** (complete) — Explicit memory tools and agent-directed retrieval
-- **Phase 2** — Selective automatic extraction from completed turns and compaction summaries
+- **Phase 2** (complete) — Selective automatic extraction from compaction/branch summaries, with a review queue and bulk revert
 - **Phase 3** — Richer retrieval, long-term maintenance, and pruning workflows
 
 See [PRD.md](PRD.md) for full product requirements and phase detail.
