@@ -52,6 +52,16 @@ describe("getMemoryStats", () => {
 		expect(stats.pendingCandidates).toBe(0);
 		expect(stats.unreviewedNodes).toBe(0);
 	});
+
+	it("flags walGrowthHint only when the WAL record count crosses the threshold", async () => {
+		// hasUncompactedWAL is useless (true after the first write); the hint must
+		// key off the WAL record count (nextWALSequence - 1) vs a threshold.
+		const below = makeFakeStore({ nextWALSequence: 101n }); // 100 records
+		expect((await getMemoryStats(below, { walThreshold: 2000 })).walGrowthHint).toBe(false);
+
+		const above = makeFakeStore({ nextWALSequence: 5001n }); // 5000 records
+		expect((await getMemoryStats(above, { walThreshold: 2000 })).walGrowthHint).toBe(true);
+	});
 });
 
 describe("findDuplicateCandidates", () => {

@@ -42,6 +42,8 @@ export function makeEdge(
 export interface FakeStoreData {
 	nodes?: Node[];
 	edges?: Edge[];
+	/** Optional akg-ts WAL sequence proxy for maintenance/compaction tests. */
+	nextWALSequence?: bigint;
 }
 
 /**
@@ -84,6 +86,10 @@ export function makeFakeStore(data: FakeStoreData = {}): MemoryStore {
 					(relation === undefined || e.relation === relation),
 			),
 	};
+
+	if (data.nextWALSequence !== undefined) {
+		(store as Record<string, unknown>).nextWALSequence = data.nextWALSequence;
+	}
 
 	return { store } as unknown as MemoryStore;
 }

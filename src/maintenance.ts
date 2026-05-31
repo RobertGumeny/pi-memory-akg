@@ -19,9 +19,16 @@ export interface DuplicateCandidate {
 	nodeIds: string[];
 }
 
+// AKG rewrites the full file on every commit and only resets the WAL on
+// compact(), so `hasUncompactedWAL` flips true after the first write of a
+// session and stays true — useless as a "time to compact" signal. The real
+// bloat proxy is the WAL record count (`nextWALSequence - 1`); hint only once it
+// crosses this threshold. See docs/akg-gap-inventory.md (EXT-1, GAP-4).
+const DEFAULT_WAL_COMPACTION_THRESHOLD = 2000;
+
 export async function getMemoryStats(
 	store: MemoryStore,
-	opts: { pendingCandidates?: number } = {},
+	opts: { pendingCandidates?: number; walThreshold?: number } = {},
 ): Promise<MemoryStats> {
 	const s = store.store;
 	const nodes = s.listNodes();
@@ -40,10 +47,12 @@ export async function getMemoryStats(
 	const sorted = [...nodes].sort((a, b) => b.updatedAt - a.updatedAt);
 	const recentTitles = sorted.slice(0, 5).map((n) => n.title);
 
-	// `hasUncompactedWAL` is a real Store getter; the unit fake omits it → false.
-	const walGrowthHint = Boolean(
-		(s as { hasUncompactedWAL?: boolean }).hasUncompactedWAL,
-	);
+	// `nextWALSequence` is a real Store getter (bigint); the unit fake omits it.
+	// `nextWALSequence - 1` ≈ WAL records accumulated since the last compaction.
+	const threshold = opts.walThreshold ?? DEFAULT_WAL_COMPACTION_THRESHOLD;
+	const nextSeq = (s as { nextWALSequence?: bigint }).nextWALSequence;
+	const walRecords = typeof nextSeq === "bigint" ? Number(nextSeq - 1n) : 0;
+	const walGrowthHint = walRecords > threshold;
 
 	return {
 		totalNodes: nodes.length,
