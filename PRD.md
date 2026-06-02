@@ -1,8 +1,9 @@
 # PRD: AKG Durable Memory Pi Package
 
-Status: Phase 0 + Phase 1 implemented; Phase 2 product decisions resolved and broken down in `TASKS.md`  
+Status: Phase 0–2 implemented and validated (on `akg-ts@0.1.3`); Phase 3 roadmap drafted into tasks in `TASKS.md`  
 Source brief: `report-akg_pi_memory_recommendations.md`  
-Last updated: 2026-05-30
+AKG gap reconciliation: archived (see `docs/akg-gap-inventory.md` in git history through commit `ba7d92b`)  
+Last updated: 2026-06-02
 
 ## 1. Problem
 
@@ -537,19 +538,37 @@ Epic 1 must complete before Epic 2 (Epic 2's surfaces and wiring consume the Epi
 
 ### Phase 3: richer retrieval and long-term maintenance
 
-Outcome: Memory remains useful as the graph grows.
+Outcome: Memory remains useful, fast, and maintainable as the graph grows, and can be combined across files without losing provenance.
 
 Scope:
 
-- Improved ranking over retrieved candidate sets.
-- Better graph-neighborhood and recency-aware retrieval.
-- Pruning, superseding, and consolidation workflows.
-- Optional merge/consolidation helpers for imported or synced memory files.
-- Future named memory stores/scopes, such as shared project memory, private local memory, environment-specific memory, and sensitive metadata memory. Phase 1 should avoid implementation choices that prevent later named-store support, but should not treat AKG as a raw secret vault without explicit encryption and policy work.
+- Improved ranking over retrieved candidate sets (recency, edge strength/confidence, tag/type relevance).
+- Better graph-neighborhood and recency-aware retrieval, including multi-hop traversal.
+- Pruning, superseding, and consolidation workflows within a single store.
+- Cross-file merge/consolidation for imported or synced memory files.
+- Future named memory stores/scopes, such as shared project memory, private local memory, environment-specific memory, and sensitive metadata memory. Phase 1 avoided implementation choices that prevent later named-store support, but AKG must not be treated as a raw secret vault without explicit encryption and policy work.
+
+**Reconciliation with the AKG gap inventory (2026-06-02).** Phase 3 is the first phase whose design is materially shaped by where AKG itself sits. The reconciliation was captured in a gap inventory (now archived — see `docs/akg-gap-inventory.md` in git history through commit `ba7d92b`), which changed the framing of several Phase 3 items:
+
+- **AKG write-path conformance shipped in `akg-ts@0.1.3` and is now consumed by this project.** Crash-atomic writes (GAP-1) and incremental append-only `commit()` + the auto-flush valve (write-side of GAP-4) are live in the SDK we run. Remaining adoption work is no longer a release dependency: verify crash-atomicity, and switch the `/memory-status` compaction hint from `nextWALSequence` to the precise accessors (`uncompactedWALEntryCount`/`uncompactedWALByteCount`). A periodic `compact()` cadence becomes worthwhile because uncompacted WAL is now replayed on every open.
+- **Cross-file merge is spec-unblocked but SDK-unbuilt.** AKG `docs/spec/08-merge.md` resolved merge *at spec altitude* with a **conflict-preservation contract** (identity = `n:{type}:{id}` / `(from,relation,to)`; any differing logical field — including `version`/timestamps — is a conflict an implementer MUST NOT silently discard). Neither SDK implements it yet, and it is not in AKG's current "Pile 1." So pi-memory's Phase 3 merge work would be **app-level against the contract**: choose and document our own resolution policy, stage nodes-before-edges, and preserve source provenance via a `meta` key we own (the public API still cannot carry source `created_at`/`updated_at`/`version`). It needs no AKG release — but per the dogfooding-first decision it is **deferred until real multi-file demand appears.** Single-user local use never invokes merge; a committed `.akg` is already shareable as-is (one binary file), and merge is what would later resolve a *binary git conflict* between two writers — so the merge engine, if built, doubles as a git merge driver for `.akg`. We will not build it speculatively.
+- **Read-side scaling stays an extension concern.** AKG reads remain O(scan) with no runtime index, and `strength`/`confidence` are stored but never range-validated or used for ranking. Phase 3 ranking and multi-hop retrieval therefore use the **scan-once, rank/traverse-in-memory** pattern (one snapshot/adjacency map per query), and **clamp/validate `strength`/`confidence` to `[0,1]` app-side** before ranking on them (GAP-5).
+- **Concurrency remains app-level.** AKG still has no locking and a same-length concurrent commit silently loses updates (GAP-3). If multi-process access to one `.pi/memory.akg` ever becomes real, Phase 3 adds an app-level advisory lockfile; until then the existing one-store-per-session convention holds.
+- **Sensitive named stores remain an app-level encryption concern**, and the now-landed crash-atomic writer leaves a transient plaintext temp file per commit — so a strict "never plaintext on disk" posture for a sensitive store must bypass the SDK's file I/O entirely (manage serialization/encryption around `Store.fromBytes`).
+
+**Delivery — Phase 3 is drafted as sequential epics** in `TASKS.md` (P3-xxx, rough draft):
+
+- **Epic 0 — Adopt the landed `akg-ts` write-path.** Release + dep bump + crash-atomicity verification + precise compaction hint + compaction cadence. Unblocks the durability/WAL gains already built in the SDK.
+- **Epic 1 — Ranking & richer retrieval.** Clamp `strength`/`confidence`, a scan-once ranking module, multi-hop/neighborhood traversal, and wiring ranking into `memory_recall`/`memory_recent`.
+- **Epic 2 — Maintenance & consolidation (single store).** Near-duplicate/superseded consolidation, pruning sweeps, and status/maintenance surfaces.
+- **Epic 3 — Cross-file merge (GAP-2). _Deferred — demand-driven._** Choose a resolution policy against `08-merge.md`, build the app-side merge/import path with provenance preservation, and expose it as a tool/command (and potentially a git merge driver for `.akg`). Not started until a concrete multi-file need appears.
+- **Epic 4 — Named stores/scopes. _Deferred — likely a separate Phase 4._** Store registry + scope routing and sensitive-store (at-rest encryption) handling. Largely dissolved by the realization that a single `.akg` is directly committable for sharing; what remains (a private/shared split, encrypted sensitive store) is unproven demand.
 
 Exit criteria:
 
 - Long-lived project memory remains relevant, inspectable, and maintainable.
+- The package consumes the crash-safe `akg-ts` release and surfaces a precise, non-spammy compaction recommendation.
+- Two memory files can be merged with conflict preservation and without losing source provenance.
 
 ## 13. Suggested Implementation Architecture
 
@@ -661,6 +680,6 @@ The extension should remain the runtime owner of memory behavior. Source modules
 
 ## 15. Readiness State
 
-This PRD is comprehensive and the Section 14 product policy questions are resolved. Phase 0 and Phase 1 are implemented (validated against `akg-ts` 0.1.1 and Pi 0.78.0, with a Vitest test baseline). Phase 2 product decisions are resolved (§14, items 6–9) and broken down into implementation-ready tasks in `TASKS.md` (P2-001..015). Phase 3 remains roadmap-level.
+This PRD is comprehensive and the Section 14 product policy questions are resolved. Phases 0–2 are implemented and validated against `akg-ts@0.1.3` and Pi 0.78.0, with a Vitest baseline (122 tests) and live-wiring validation (validation notes have been archived; see git history). Phase 2 product decisions are resolved (§14, items 6–9). Phase 3 is drafted into a rough task batch in `TASKS.md` (P3-xxx, organized as Epics 0–4); the Phase 3 tasks are a planning draft, not yet implementation-ready. The crash-safe write-path is now consumed (`0.1.3`), so the immediate next step is single-user dogfooding rather than further roadmap build-out.
 
 Resolved naming decision: the package/repository should be `rgumeny/pi-memory-akg` unless a later publishing step requires a separate npm package name.
