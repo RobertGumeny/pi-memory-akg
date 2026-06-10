@@ -9,7 +9,8 @@ describe("loadSettings", () => {
 			toolResultBudget: 6000,
 			requireConfirmationForAll: false,
 			memoryFilePath: ".pi/memory.akg",
-			autoCaptureEnabled: true,
+			debug: false,
+			autoCaptureEnabled: false,
 			autoCaptureSources: ["compaction", "branch"],
 			headlessPolicy: "auto-commit",
 			candidateQueuePath: ".pi/memory-candidates.jsonl",
@@ -18,6 +19,13 @@ describe("loadSettings", () => {
 			maxCandidatesPerExtraction: 10,
 			liveTurnNudge: false,
 		});
+	});
+
+	it("defaults auto-capture OFF and debug OFF for the quiet alpha experience", () => {
+		expect(loadSettings().autoCaptureEnabled).toBe(false);
+		expect(loadSettings().debug).toBe(false);
+		// Opt-in still works.
+		expect(loadSettings({ autoCaptureEnabled: true }).autoCaptureEnabled).toBe(true);
 	});
 
 	describe("Phase 2 auto-capture settings", () => {

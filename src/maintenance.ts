@@ -6,6 +6,7 @@ export interface MemoryStats {
 	countsByType: Record<string, number>;
 	countsByStatus: Record<string, number>;
 	recentTitles: string[];
+	recentRefs: string[]; // recent nodes as `type/id` refs (parallel to recentTitles)
 	filePath: string;
 	// Phase 2 visibility (P2-010)
 	pendingCandidates: number; // sidecar queue depth
@@ -45,7 +46,9 @@ export async function getMemoryStats(
 	}
 
 	const sorted = [...nodes].sort((a, b) => b.updatedAt - a.updatedAt);
-	const recentTitles = sorted.slice(0, 5).map((n) => n.title);
+	const recent = sorted.slice(0, 5);
+	const recentTitles = recent.map((n) => n.title);
+	const recentRefs = recent.map((n) => `${n.type}/${n.id}`);
 
 	// `nextWALSequence` is a real Store getter (bigint); the unit fake omits it.
 	// `nextWALSequence - 1` ≈ WAL records accumulated since the last compaction.
@@ -59,6 +62,7 @@ export async function getMemoryStats(
 		countsByType,
 		countsByStatus,
 		recentTitles,
+		recentRefs,
 		filePath: store.filePath,
 		pendingCandidates: opts.pendingCandidates ?? 0,
 		unreviewedNodes,

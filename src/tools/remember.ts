@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import type { MemoryStore } from "../memory-store.js";
 import type { Settings } from "../settings.js";
 import { assessRisk } from "../risk-policy.js";
@@ -12,13 +13,65 @@ import {
 	META_LAST_SEEN_AT,
 } from "../schema.js";
 
+/** 8-char content hash, used for collision-safe fallback ids. */
+export function shortHash(input: string): string {
+	return crypto.createHash("sha256").update(input).digest("hex").slice(0, 8);
+}
+
+/**
+ * Convert a title into a node-id slug. Node ids are validated by akg-ts's
+ * `validateNodeID` (no colons, non-empty, ≤64 bytes) — hyphens and mixed runs
+ * are fine — so we keep the conventional hyphen separator. A title that reduces
+ * to empty (e.g. all punctuation) falls back to a hashed id so we never pass an
+ * empty id to `putNode` (which would throw `empty node ID`).
+ */
 export function slugify(title: string): string {
-	return title
+	const base = title
 		.toLowerCase()
 		.replace(/[^a-z0-9]+/g, "-") // any run of non-alphanumerics → single hyphen
 		.replace(/^-+|-+$/g, "") // trim leading/trailing hyphens
 		.slice(0, 60)
 		.replace(/-+$/g, ""); // trim a trailing hyphen the slice may have created
+	return base || `note-${shortHash(title)}`;
+}
+
+/**
+ * Normalize a user- or model-supplied tag to a valid akg-ts component. UNLIKE
+ * node ids, tags are validated with `validateTag` → `validateComponent`, which
+ * accepts only `[a-z0-9_]` with single, non-edge underscores — so a hyphenated
+ * or capitalized tag (e.g. a repo name like `tiny-notes`) throws
+ * `invalid component` unless normalized. Returns `null` for a tag that reduces
+ * to empty so callers can drop it.
+ */
+export function normalizeTag(tag: string): string | null {
+	const t = tag
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "_")
+		.replace(/^_+|_+$/g, "")
+		.slice(0, 60)
+		.replace(/_+$/g, "");
+	return t || null;
+}
+
+/** akg-ts component grammar (`validateComponent`): `[a-z0-9]` runs joined by single underscores. */
+const COMPONENT_RE = /^[a-z0-9]+(?:_[a-z0-9]+)*$/;
+
+/**
+ * Validate a caller-supplied `type/id` supersede ref so a malformed ref fails
+ * with a clear message instead of a raw akg-ts throw from the downstream
+ * `putEdge`. The `type` half is a component (`[a-z0-9_]`); the `id` half follows
+ * the laxer node-id rule (non-empty, no colon, hyphens allowed). Returns an
+ * error message if malformed, or `null` if the ref shape is valid.
+ */
+export function validateRefArg(ref: string): string | null {
+	const slash = ref.indexOf("/");
+	const type = slash > 0 ? ref.slice(0, slash) : "";
+	const id = slash > 0 ? ref.slice(slash + 1) : "";
+	const idOk = id.length > 0 && id.length <= 64 && !id.includes(":");
+	if (!type || !COMPONENT_RE.test(type) || !idOk) {
+		return `Invalid ref "${ref}". A ref must look like "type/some-id" — a lowercase type (letters, digits, underscores) and a non-empty id.`;
+	}
+	return null;
 }
 
 export function parseCallerProvenance(
@@ -61,6 +114,13 @@ export async function handleRemember(
 		return `Confirmation required before storing this memory: ${risk.reason}. Use memory_remember with explicit confirm: true to proceed.`;
 	}
 
+	// Validate the supersede ref up front so a malformed ref fails with a clear
+	// message before we write anything (akg-ts would otherwise throw raw downstream).
+	if (args.ref !== undefined) {
+		const refErr = validateRefArg(args.ref);
+		if (refErr) return refErr;
+	}
+
 	const slug = slugify(title);
 
 	// Build merged provenance metadata
@@ -88,7 +148,13 @@ export async function handleRemember(
 		if (meta[key] === undefined) delete meta[key];
 	}
 
-	const nodeRef = s.putNode(type, slug, { title, body, meta }, tags);
+	// Normalize tags to valid akg-ts components (hyphenated/uppercase tags would
+	// otherwise throw `invalid component`); drop empties and dedupe.
+	const normalizedTags = [
+		...new Set(tags.map(normalizeTag).filter((t): t is string => t !== null)),
+	];
+
+	const nodeRef = s.putNode(type, slug, { title, body, meta }, normalizedTags);
 
 	// If caller provided a ref to supersede, add edge from new node to old
 	if (args.ref) {
