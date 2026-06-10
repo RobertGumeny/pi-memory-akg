@@ -4,3 +4,5 @@ dist/
 *.d.ts
 .env
 .env.*
+
+memory.akg
