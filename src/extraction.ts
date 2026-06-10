@@ -1,7 +1,6 @@
-import crypto from "crypto";
 import { NODE_TYPES } from "./schema.js";
 import { buildAutoProvenance } from "./provenance.js";
-import { slugify } from "./tools/remember.js";
+import { slugify, shortHash } from "./tools/remember.js";
 import type { MemoryCandidate } from "./candidate-queue.js";
 import type { Settings } from "./settings.js";
 
@@ -86,10 +85,6 @@ function isNonEmptyString(s: unknown): s is string {
 
 function isUnitConfidence(c: unknown): c is number {
 	return typeof c === "number" && Number.isFinite(c) && c >= 0 && c <= 1;
-}
-
-function shortHash(input: string): string {
-	return crypto.createHash("sha256").update(input).digest("hex").slice(0, 8);
 }
 
 /**

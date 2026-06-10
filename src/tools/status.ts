@@ -2,17 +2,6 @@ import type { MemoryStore } from "../memory-store.js";
 import type { Settings } from "../settings.js";
 import { getMemoryStats } from "../maintenance.js";
 
-const AVAILABLE_TOOLS = [
-	"memory_remember",
-	"memory_recall",
-	"memory_link",
-	"memory_forget",
-	"memory_recent",
-	"memory_inspect",
-	"memory_review",
-	"memory_revert",
-];
-
 export async function handleStatus(
 	store: MemoryStore | null,
 	settings: Settings,
@@ -20,67 +9,50 @@ export async function handleStatus(
 ): Promise<string> {
 	if (!store?.isOpen) {
 		return [
-			"Memory status: not yet active",
+			"AKG memory: not active",
 			"",
-			"AKG memory store is not initialized for this session.",
+			"The memory store is not initialized for this session.",
 			"Start a Pi session with this package loaded to activate memory.",
 		].join("\n");
 	}
 
 	const stats = await getMemoryStats(store, { pendingCandidates });
+	const st = stats.countsByStatus;
 
-	const countsByTypeLines = Object.entries(stats.countsByType)
-		.map(([t, n]) => `  ${t}: ${n}`)
-		.join("\n") || "  (none)";
+	const typesLine =
+		Object.entries(stats.countsByType)
+			.map(([t, n]) => `${n} ${t}${n === 1 ? "" : "s"}`)
+			.join(", ") || "none yet";
 
-	const countsByStatusLines = Object.entries(stats.countsByStatus)
-		.map(([s, n]) => `  ${s}: ${n}`)
-		.join("\n") || "  (none)";
-
-	const recentTitlesLines = stats.recentTitles.length > 0
-		? stats.recentTitles.map((t, i) => `  ${i + 1}. ${t}`).join("\n")
-		: "  (none)";
+	const recentLines =
+		stats.recentRefs.length > 0
+			? stats.recentRefs.map((r) => `- ${r}`).join("\n")
+			: "- (none yet)";
 
 	const lines = [
-		"Memory status",
-		"=============",
-		`Memory enabled: yes`,
-		`Memory file: ${stats.filePath}`,
+		`AKG memory: enabled`,
+		`File: ${stats.filePath}`,
+		`Hint: ${settings.hintEnabled ? `enabled, ${settings.hintBudget} chars` : "disabled"}`,
+		`Auto-capture: ${settings.autoCaptureEnabled ? "enabled" : "disabled (experimental)"}`,
 		``,
-		`Hint: ${settings.hintEnabled ? "enabled" : "disabled"} (budget: ${settings.hintBudget} chars)`,
-		`Tool result budget: ${settings.toolResultBudget} chars`,
-		``,
-		`Total nodes: ${stats.totalNodes}`,
-		``,
-		`Counts by type:`,
-		countsByTypeLines,
-		``,
-		`Counts by status:`,
-		countsByStatusLines,
-		``,
-		`Recent memory titles (last 5):`,
-		recentTitlesLines,
-		``,
-		`Auto-capture: ${settings.autoCaptureEnabled ? "enabled" : "disabled"} (headless policy: ${settings.headlessPolicy})`,
-		`Pending review: ${stats.pendingCandidates} candidate(s) in ${settings.candidateQueuePath}`,
-		`Unreviewed auto-captured: ${stats.unreviewedNodes}`,
+		`Records: ${st.active ?? 0} active, ${st.unreviewed ?? 0} unreviewed, ${st.inactive ?? 0} inactive`,
+		`Types: ${typesLine}`,
+		// The pending review queue only exists when auto-capture is enabled.
+		...(settings.autoCaptureEnabled
+			? [`Pending queue: ${stats.pendingCandidates} candidate(s)`]
+			: []),
 		...(stats.walGrowthHint
-			? [`Maintenance: uncompacted WAL present — run maintenance compaction (store.compact()).`]
+			? [`Maintenance: uncompacted WAL is large — run /memory-cleanup.`]
 			: []),
 		``,
-		`Available tools:`,
-		AVAILABLE_TOOLS.map((t) => `  ${t}`).join("\n"),
+		`Recent:`,
+		recentLines,
 		``,
-		`Recommendation: add .pi/memory.akg (and .pi/memory-candidates.jsonl) to .gitignore for private/local memory.`,
-		``,
-		`Suggested next actions:`,
-		`  Run memory_recall to explore existing memories.`,
-		`  Run memory_remember to store a new durable fact.`,
-		...(stats.pendingCandidates > 0
-			? ["  Run /memory-review (or memory_review) to triage pending candidates."]
-			: []),
-		...(stats.unreviewedNodes > 0
-			? ["  Run /memory-revert (or memory_revert) to sweep unreviewed auto-captures."]
+		`Next actions:`,
+		`- Ask me to remember durable project decisions.`,
+		`- Run /memory-cleanup if memory feels stale or duplicated.`,
+		...(settings.autoCaptureEnabled && stats.pendingCandidates > 0
+			? ["- Run /memory-review to triage pending candidates."]
 			: []),
 	];
 

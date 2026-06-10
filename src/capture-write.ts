@@ -1,6 +1,6 @@
 import type { MemoryStore } from "./memory-store.js";
 import type { MemoryCandidate } from "./candidate-queue.js";
-import { slugify } from "./tools/remember.js";
+import { slugify, normalizeTag } from "./tools/remember.js";
 import { parseRef } from "./ref.js";
 import {
 	META_CWD,
@@ -41,11 +41,15 @@ export function writeCandidateNode(
 	if (p.summary_entry_id !== undefined) meta.summary_entry_id = p.summary_entry_id;
 	if (p.confidence !== undefined) meta.confidence = p.confidence;
 
+	const normalizedTags = [
+		...new Set((candidate.tags ?? []).map(normalizeTag).filter((t): t is string => t !== null)),
+	];
+
 	store.store.putNode(
 		candidate.type,
 		id,
 		{ title: candidate.title, body: candidate.body, meta },
-		candidate.tags ?? [],
+		normalizedTags,
 	);
 	return `${candidate.type}/${id}`;
 }

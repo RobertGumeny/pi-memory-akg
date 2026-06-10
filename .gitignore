@@ -4,3 +4,11 @@ dist/
 *.d.ts
 .env
 .env.*
+
+# Per-developer workspace / tooling state (not package content)
+.pi/
+.claude/
+TASKS.md
+scripts/
+PRD.md
+pre-alpha-release-prep.md

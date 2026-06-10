@@ -7,6 +7,8 @@ description: Selective durable memory policy for the pi-memory-akg package. Teac
 
 This skill governs how to use AKG project memory selectively and deliberately. Pi session JSONL files remain the source of truth for exact conversation history. AKG stores reusable knowledge — facts worth having again next session without re-reading transcripts.
 
+The primary path is the **explicit memory loop**: `memory_remember`, `memory_recall`, `memory_recent`, `memory_inspect`, `memory_link`, `memory_forget`, plus `/memory-status` and `/memory-cleanup`. Automatic capture (and its `memory_review`/`memory_revert` tools) is **experimental and disabled by default** — those tools are not registered unless `autoCaptureEnabled` is turned on, so don't reach for them in the default configuration.
+
 ---
 
 ## What qualifies as durable memory
@@ -82,18 +84,23 @@ Call when you want to see what was last worked on — useful at the start of a s
 ### memory_inspect
 Call when `memory_recall` returns a record that looks relevant and you need its full body, metadata, and edges. Do not inspect records speculatively — check the recall summary first.
 
-### memory_review
+### memory_review *(experimental — only registered when `autoCaptureEnabled` is on)*
 Call to triage the pending auto-capture queue. `action: "list"` shows pending candidates; `action: "accept"` (with an `id`, and optional `edits` to fix the title/body/type/tags) promotes a candidate to an `active` memory record; `action: "reject"` discards it. Prefer editing a slightly-wrong candidate over rejecting and re-authoring it. The `/memory-review` command walks the queue interactively.
 
-### memory_revert
+### memory_revert *(experimental — only registered when `autoCaptureEnabled` is on)*
 Call to undo auto-captured memories that should not have been written. Always run it as a **dry run first** (no `confirm`) to see exactly what would be affected, then re-run with `confirm: true`. Default mode `deactivate` keeps the records inspectable; `delete` removes them. Narrow the sweep with `origin` (`compaction`/`branch`) or `sinceMs`. This is a forward forget, not a rollback.
 
 ---
 
-## Automatic capture (Phase 2)
+## Automatic capture (experimental — off by default)
 
-The package can capture durable memories **automatically**, but only from Pi's
-already-distilled summaries — never from raw turns:
+> Disabled by default in this alpha. The rest of this section applies **only when
+> `autoCaptureEnabled` is turned on**; otherwise the ingestion hooks, the queue, and
+> `memory_review`/`memory_revert` do not exist for the session. The explicit loop above
+> is the supported path.
+
+When enabled, the package can capture durable memories **automatically**, but only
+from Pi's already-distilled summaries — never from raw turns:
 
 - **Sources are summaries only.** A bounded LLM extraction pass runs on Pi
   compaction summaries (`session_compact`) and branch summaries (`session_tree`).

@@ -28,14 +28,23 @@ export default function akgMemoryExtension(pi: ExtensionAPI) {
 	let llm: LlmFn | null = null;
 	let nudgedThisSession = false;
 
+	// Lifecycle/diagnostic logging is opt-in via the `debug` setting so a normal
+	// session stays quiet in the TUI/stderr. Error-path writes stay unconditional.
+	const dlog = (msg: string) => {
+		if (settings.debug) process.stderr.write(msg);
+	};
+
 	pi.on("session_start", async (_event, ctx) => {
 		try {
 			store = await MemoryStore.open(ctx.cwd, settings);
-			queue = CandidateQueue.open(ctx.cwd, settings);
+			// The candidate queue only backs auto-capture; skip it when disabled.
+			queue = settings.autoCaptureEnabled ? CandidateQueue.open(ctx.cwd, settings) : null;
 			llm = makeLlmFn(ctx.model, ctx.modelRegistry);
 			nudgedThisSession = false;
-			process.stderr.write(
-				`[akg-memory] session_start fired: opened ${store.filePath}, queue ${queue.filePath}\n`,
+			dlog(
+				`[akg-memory] session_start: opened ${store.filePath}` +
+					(queue ? `, queue ${queue.filePath}` : "") +
+					"\n",
 			);
 		} catch (err) {
 			process.stderr.write(
@@ -90,7 +99,7 @@ export default function akgMemoryExtension(pi: ExtensionAPI) {
 				hasUI: ctx.hasUI,
 				signal: ctx.signal,
 			});
-			process.stderr.write(
+			dlog(
 				`[akg-memory] auto-capture (${origin}): committed ${report.committed.length}, ` +
 					`deferred ${report.deferred.length}, dropped ${report.dropped}, duplicates ${report.duplicates}\n`,
 			);
@@ -101,40 +110,44 @@ export default function akgMemoryExtension(pi: ExtensionAPI) {
 		}
 	}
 
-	pi.on("session_compact", async (event, ctx) => {
-		await captureFromSummary(
-			event.compactionEntry.summary,
-			"compaction",
-			event.compactionEntry.id,
-			ctx,
-		);
-	});
+	// Auto-capture is experimental and OFF by default for alpha: its ingestion
+	// hooks and the review nudge only register when explicitly enabled.
+	if (settings.autoCaptureEnabled) {
+		pi.on("session_compact", async (event, ctx) => {
+			await captureFromSummary(
+				event.compactionEntry.summary,
+				"compaction",
+				event.compactionEntry.id,
+				ctx,
+			);
+		});
 
-	pi.on("session_tree", async (event, ctx) => {
-		if (!event.summaryEntry) return;
-		await captureFromSummary(
-			event.summaryEntry.summary,
-			"branch",
-			event.summaryEntry.id,
-			ctx,
-		);
-	});
+		pi.on("session_tree", async (event, ctx) => {
+			if (!event.summaryEntry) return;
+			await captureFromSummary(
+				event.summaryEntry.summary,
+				"branch",
+				event.summaryEntry.id,
+				ctx,
+			);
+		});
 
-	pi.on("agent_end", async (_event, ctx) => {
-		// Deterministic live-turn nudge: no LLM pass. At most one notify per session,
-		// only when opted in, UI is present, and there are pending candidates to review.
-		if (!settings.liveTurnNudge || !ctx.hasUI || nudgedThisSession || !queue) return;
-		const pending = queue.list().length;
-		if (pending === 0) return;
-		nudgedThisSession = true;
-		ctx.ui.notify(
-			`AKG memory: ${pending} pending candidate(s). Run /memory-review to triage them.`,
-			"info",
-		);
-	});
+		pi.on("agent_end", async (_event, ctx) => {
+			// Deterministic live-turn nudge: no LLM pass. At most one notify per session,
+			// only when opted in, UI is present, and there are pending candidates to review.
+			if (!settings.liveTurnNudge || !ctx.hasUI || nudgedThisSession || !queue) return;
+			const pending = queue.list().length;
+			if (pending === 0) return;
+			nudgedThisSession = true;
+			ctx.ui.notify(
+				`AKG memory: ${pending} pending candidate(s). Run /memory-review to triage them.`,
+				"info",
+			);
+		});
+	}
 
 	pi.on("before_agent_start", async (event, _ctx) => {
-		process.stderr.write("[akg-memory] before_agent_start fired\n");
+		dlog("[akg-memory] before_agent_start fired\n");
 		if (!settings.hintEnabled || !store?.isOpen) return;
 
 		const inner = HINT_TEXT.slice(0, settings.hintBudget - 40); // reserve room for XML wrapper
@@ -155,14 +168,14 @@ export default function akgMemoryExtension(pi: ExtensionAPI) {
 			try {
 				await store.commit();
 				await store.close();
-				process.stderr.write("[akg-memory] session_shutdown fired: committed and closed\n");
+				dlog("[akg-memory] session_shutdown: committed and closed\n");
 			} catch (err) {
 				process.stderr.write(
 					`[akg-memory] session_shutdown error: ${(err as Error).message}\n`,
 				);
 			}
 		} else {
-			process.stderr.write("[akg-memory] session_shutdown fired\n");
+			dlog("[akg-memory] session_shutdown: no open store\n");
 		}
 		// The candidate queue is durable per-append (JSONL fsync), so there is
 		// nothing to flush — just drop the references.
@@ -353,8 +366,8 @@ export default function akgMemoryExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	// ── memory_review ────────────────────────────────────────────────────────────
-	pi.registerTool({
+	// ── memory_review (experimental — registered only when auto-capture is on) ───
+	if (settings.autoCaptureEnabled) pi.registerTool({
 		name: "memory_review",
 		label: "Memory Review",
 		description:
@@ -393,8 +406,8 @@ export default function akgMemoryExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	// ── memory_revert ────────────────────────────────────────────────────────────
-	pi.registerTool({
+	// ── memory_revert (experimental — registered only when auto-capture is on) ───
+	if (settings.autoCaptureEnabled) pi.registerTool({
 		name: "memory_revert",
 		label: "Memory Revert",
 		description:
@@ -436,8 +449,8 @@ export default function akgMemoryExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	// ── /memory-review command ───────────────────────────────────────────────────
-	pi.registerCommand("memory-review", {
+	// ── /memory-review command (experimental — only when auto-capture is on) ─────
+	if (settings.autoCaptureEnabled) pi.registerCommand("memory-review", {
 		description: "Walk pending auto-captured memory candidates and accept/reject each",
 		handler: async (_args, ctx) => {
 			if (!store?.isOpen || !queue) {
@@ -448,8 +461,8 @@ export default function akgMemoryExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	// ── /memory-revert command ───────────────────────────────────────────────────
-	pi.registerCommand("memory-revert", {
+	// ── /memory-revert command (experimental — only when auto-capture is on) ─────
+	if (settings.autoCaptureEnabled) pi.registerCommand("memory-revert", {
 		description: "Dry-run then revert auto-captured unreviewed memories",
 		handler: async (args, ctx) => {
 			if (!store?.isOpen) {

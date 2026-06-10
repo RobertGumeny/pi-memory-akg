@@ -7,6 +7,8 @@ export interface Settings {
 	toolResultBudget: number;
 	requireConfirmationForAll: boolean;
 	memoryFilePath: string;
+	/** Emit lifecycle/diagnostic logs to stderr. Off by default (quiet alpha). */
+	debug: boolean;
 
 	// Phase 2 — auto-capture settings (PRD §12, TASKS P2-001)
 	autoCaptureEnabled: boolean;
@@ -25,9 +27,10 @@ const DEFAULTS: Settings = {
 	toolResultBudget: 6000,
 	requireConfirmationForAll: false,
 	memoryFilePath: ".pi/memory.akg",
+	debug: false,
 
-	// Phase 2 defaults
-	autoCaptureEnabled: true,
+	// Phase 2 defaults — auto-capture is experimental and OFF by default for alpha.
+	autoCaptureEnabled: false,
 	autoCaptureSources: ["compaction", "branch"],
 	headlessPolicy: "auto-commit",
 	candidateQueuePath: ".pi/memory-candidates.jsonl",

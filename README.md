@@ -2,13 +2,17 @@
 
 AKG-backed durable project memory for [Pi](https://github.com/earendil-works/pi). Stores decisions, constraints, preferences, tasks, and artifacts across sessions — without replacing Pi's JSONL session history.
 
+> **Status: pre-alpha (`v0.1.0-alpha.1`).** Early, but the explicit memory loop is
+> dogfood-validated. Automatic capture is experimental and **off by default** — the
+> alpha is about explicit, durable, inspectable project memory.
+
 ## Install
 
 ```bash
-pi install git:github.com/rgumeny/pi-memory-akg
+pi install git:github.com/RobertGumeny/pi-memory-akg@v0.1.0-alpha.1
 ```
 
-During development, load directly from a clone of the repo. Install dependencies once (this pulls the `akg-ts` runtime dep and the dev toolchain), then load from the repo root:
+Pinned to a git tag for the pre-alpha. During development, load directly from a clone. Install dependencies once (pulls the `akg-ts` runtime dep and the dev toolchain), then load from the repo root:
 
 ```bash
 npm install
@@ -19,7 +23,7 @@ pi -e ./
 
 - **Pi 0.78.0+** (validated against 0.78.0).
 - **`akg-ts@0.1.3`** — installed automatically as a dependency. No separate build step; Pi loads the TypeScript directly.
-- **Automatic capture (Phase 2) uses your session's active model** — no separate model or API key to configure; it rides on whatever model the session is already using. The explicit memory tools need no model at all. In a session with no usable model (e.g. offline mode, or none selected), auto-capture safely no-ops rather than erroring — so an empty review queue there is expected, not a bug.
+- **No model or API key required** for the explicit memory tools. (The experimental auto-capture feature, when enabled, rides on the session's active model — see [Automatic capture](#automatic-capture-experimental--off-by-default) below.)
 
 ## Quick start
 
@@ -69,19 +73,26 @@ Pi JSONL session files remain the source of truth for exact conversation history
 | `memory_forget` | Deactivate, supersede, or delete a memory record |
 | `memory_recent` | List recently updated records ordered by update time |
 | `memory_inspect` | Inspect full details and edges for a specific record by ID |
-| `memory_review` | List/accept/reject pending auto-captured candidates from the review queue |
-| `memory_revert` | Dry-run then deactivate/delete auto-captured `unreviewed` memories |
+
+> `memory_review` and `memory_revert` exist too, but only register when the
+> experimental auto-capture feature is enabled. See [Automatic capture](#automatic-capture-experimental--off-by-default).
 
 ## Commands & slash prompts
 
 | Command / prompt | Purpose |
 |--------|---------|
-| `/memory-status` | Deterministic memory status — file path, counts, queue depth, unreviewed count, next actions |
-| `/memory-review` | Walk the pending auto-capture queue and accept/reject each candidate |
-| `/memory-revert` | Dry-run then revert auto-captured `unreviewed` memories |
-| `/memory-cleanup` | Curation pass: duplicates, stale tasks, superseded records, unreviewed sweeps |
+| `/memory-status` | Deterministic command: file path, counts, recent refs, next actions |
+| `/memory-cleanup` | Prompt template: curation pass for duplicates, stale tasks, superseded records |
 
-## Automatic capture (Phase 2)
+`/memory-review` and `/memory-revert` are registered only when auto-capture is enabled (experimental).
+
+## Automatic capture (experimental — off by default)
+
+> **Disabled by default in this alpha.** Set `autoCaptureEnabled: true` to opt in.
+> While off, the auto-capture tools (`memory_review`, `memory_revert`), commands
+> (`/memory-review`, `/memory-revert`), and the compaction/branch ingestion hooks
+> are not registered at all. This behavior is not yet dogfooded through real Pi
+> lifecycle hooks — treat it as a preview.
 
 The package can capture durable memories automatically — but only from Pi's
 already-distilled **compaction and branch summaries**, never from raw turns. A
@@ -109,7 +120,7 @@ rollback).
 
 | Setting | Default | Meaning |
 |---------|---------|---------|
-| `autoCaptureEnabled` | `true` | Master switch for auto-capture |
+| `autoCaptureEnabled` | `false` | Master switch for auto-capture (experimental; opt-in) |
 | `autoCaptureSources` | `["compaction", "branch"]` | Which summaries to extract from |
 | `headlessPolicy` | `"auto-commit"` | Headless behavior: `auto-commit` \| `defer` \| `off` |
 | `candidateQueuePath` | `.pi/memory-candidates.jsonl` | Sidecar pending-queue path |
@@ -118,8 +129,9 @@ rollback).
 | `maxCandidatesPerExtraction` | `10` | Cap per summary |
 | `liveTurnNudge` | `false` | Opt-in `/memory-review` nudge after a turn (no LLM pass) |
 
-Phase 1 settings (`hintEnabled`, `hintBudget`, `toolResultBudget`,
-`requireConfirmationForAll`, `memoryFilePath`) are unchanged.
+Core settings (`hintEnabled`, `hintBudget`, `toolResultBudget`,
+`requireConfirmationForAll`, `memoryFilePath`, and `debug` — opt-in stderr
+diagnostics, default `false`) are independent of auto-capture.
 
 ## Roadmap
 
@@ -128,10 +140,10 @@ Phase 1 settings (`hintEnabled`, `hintBudget`, `toolResultBudget`,
 - **Phase 2** (complete) — Selective automatic extraction from compaction/branch summaries, with a review queue and bulk revert
 - **Phase 3** (drafted) — Richer retrieval and long-term maintenance, built on `akg-ts@0.1.3` (crash-atomic writes now adopted)
 
-**Immediate next step: single-user dogfooding** on a real project. The crash-safe SDK is in place and the core loop is built — actual use is what should drive the rest, so Phase 3 is intentionally a *draft* gated on that signal. The drafted batch (`TASKS.md`):
+**Immediate next step: single-user dogfooding** on a real project. The crash-safe SDK is in place and the core loop is built — actual use is what should drive the rest, so Phase 3 is intentionally a *draft* gated on that signal:
 
 - **Near-term** — finish write-path adoption (crash-atomicity smoke test, precise WAL-based compaction hint) and add recall **ranking** (recency / edge strength / relevance) plus multi-hop retrieval.
 - **As real use justifies it** — consolidation and pruning of stale or duplicate memories.
 - **Deferred until there's demand** — cross-file **merge** and **named/shared stores**. Not needed for single-user local use; parked on purpose rather than built speculatively.
 
-See [PRD.md](PRD.md) for full product requirements and [TASKS.md](TASKS.md) for the Phase 3 task breakdown.
+See [CHANGELOG.md](CHANGELOG.md) for release notes and known limitations.

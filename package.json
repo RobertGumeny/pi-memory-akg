@@ -1,8 +1,14 @@
 {
   "name": "pi-memory-akg",
-  "version": "0.1.0",
+  "version": "0.1.0-alpha.1",
   "private": true,
   "type": "module",
+  "description": "Durable, inspectable project memory for Pi, backed by an AKG knowledge graph. Explicit remember/recall/link/forget tools plus /memory-status and /memory-cleanup.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RobertGumeny/pi-memory-akg.git"
+  },
   "keywords": [
     "pi-package"
   ],
